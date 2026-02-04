@@ -1,0 +1,51 @@
+{
+  "crons": [
+    {
+      "path": "/api/fetch-cot",
+      "schedule": "0 20 * * 5"
+    },
+    {
+      "path": "/api/fetch-cme-daily",
+      "schedule": "0 23 * * 1-5"
+    },
+    {
+      "path": "/api/fetch-margins",
+      "schedule": "0 18 * * 1-5"
+    },
+    {
+      "path": "/api/fetch-spot-prices",
+      "schedule": "0 */4 * * *"
+    },
+    {
+      "path": "/api/fetch-shanghai",
+      "schedule": "0 12 * * 1-5"
+    },
+    {
+      "path": "/api/compute-derived",
+      "schedule": "30 23 * * 1-5"
+    }
+  ],
+  "functions": {
+    "app/api/fetch-cot/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/backfill-cot/route.ts": {
+      "maxDuration": 300
+    },
+    "app/api/fetch-cme-daily/route.ts": {
+      "maxDuration": 60
+    },
+    "app/api/fetch-margins/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/fetch-spot-prices/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/fetch-shanghai/route.ts": {
+      "maxDuration": 30
+    },
+    "app/api/compute-derived/route.ts": {
+      "maxDuration": 30
+    }
+  }
+}
