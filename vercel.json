@@ -23,6 +23,10 @@
     {
       "path": "/api/compute-derived",
       "schedule": "30 23 * * 1-5"
+    },
+    {
+      "path": "/api/generate-briefing",
+      "schedule": "0 0 * * 1-5"
     }
   ],
   "functions": {
@@ -46,6 +50,9 @@
     },
     "app/api/compute-derived/route.ts": {
       "maxDuration": 30
+    },
+    "app/api/generate-briefing/route.ts": {
+      "maxDuration": 120
     }
   }
 }

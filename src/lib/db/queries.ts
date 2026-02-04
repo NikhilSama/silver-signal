@@ -144,6 +144,53 @@ export async function getLatestBriefing(): Promise<DailyBriefing | null> {
   return result.rows[0] ?? null;
 }
 
+/** Get yesterday's briefing for change-over-change context */
+export async function getYesterdayBriefing(): Promise<DailyBriefing | null> {
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+  const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+  const result = await sql<DailyBriefing>`
+    SELECT * FROM daily_briefings
+    WHERE briefing_date = ${yesterdayStr}
+    LIMIT 1
+  `;
+  return result.rows[0] ?? null;
+}
+
+/** Insert a new daily briefing */
+export async function insertBriefing(briefing: {
+  briefing_date: Date;
+  overall_posture: string;
+  posture_reason: string;
+  briefing_text: string;
+  indicator_summary: Record<string, unknown>;
+}): Promise<DailyBriefing> {
+  const dateStr = briefing.briefing_date.toISOString().split('T')[0];
+
+  const result = await sql<DailyBriefing>`
+    INSERT INTO daily_briefings (
+      briefing_date, overall_posture, posture_reason, briefing_text, indicator_summary, generated_at
+    ) VALUES (
+      ${dateStr},
+      ${briefing.overall_posture},
+      ${briefing.posture_reason},
+      ${briefing.briefing_text},
+      ${JSON.stringify(briefing.indicator_summary)},
+      NOW()
+    )
+    ON CONFLICT (briefing_date)
+    DO UPDATE SET
+      overall_posture = ${briefing.overall_posture},
+      posture_reason = ${briefing.posture_reason},
+      briefing_text = ${briefing.briefing_text},
+      indicator_summary = ${JSON.stringify(briefing.indicator_summary)},
+      generated_at = NOW()
+    RETURNING *
+  `;
+  return result.rows[0];
+}
+
 /** Get browser prompt for an indicator */
 export async function getBrowserPrompt(indicatorId: number): Promise<BrowserPrompt | null> {
   const result = await sql<BrowserPrompt>`
