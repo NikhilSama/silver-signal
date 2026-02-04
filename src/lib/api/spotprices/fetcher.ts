@@ -3,8 +3,8 @@ import type { SpotPriceData, SpotPriceFetchResult } from './types';
 // Primary API - goldprice.org (reliable, no key required)
 const GOLDPRICE_API_URL = 'https://data-asg.goldprice.org/dbXRates/USD';
 
-// CME settlement prices API
-const CME_SETTLEMENTS_URL = 'https://www.cmegroup.com/CmeWS/mvc/Settlements/Futures/Settlements/5454/FUT';
+// Yahoo Finance API for futures prices (CME API is blocked)
+const YAHOO_FINANCE_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart';
 
 /** Fetch spot price and calculate backwardation */
 export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
@@ -20,7 +20,7 @@ export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
       };
     }
 
-    // Fetch front-month futures price from CME
+    // Fetch front-month futures price from Yahoo Finance
     const futuresResult = await fetchFuturesPrice();
     if (!futuresResult.success) {
       // Use spot as fallback - assume flat
@@ -55,7 +55,7 @@ export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
         isBackwardation: spread > 0,
         daysToExpiry: getDaysToExpiry(),
       },
-      sourceUrl: GOLDPRICE_API_URL,
+      sourceUrl: futuresResult.sourceUrl,
     };
   } catch (error) {
     return {
@@ -101,45 +101,85 @@ async function fetchSpotPrice(): Promise<{ success: boolean; price: number; erro
   }
 }
 
-/** Fetch front-month futures price from CME */
+/** Get Yahoo Finance symbol for front-month silver futures */
+function getYahooFuturesSymbol(): { symbol: string; contract: string } {
+  const now = new Date();
+  const month = now.getMonth(); // 0-11
+  const year = now.getFullYear();
+
+  // Silver delivery months: Mar(H), May(K), Jul(N), Sep(U), Dec(Z)
+  // Month codes: H=March, K=May, N=July, U=September, Z=December
+  const deliveryMonths = [
+    { monthNum: 2, code: 'H', name: 'MAR' },  // March
+    { monthNum: 4, code: 'K', name: 'MAY' },  // May
+    { monthNum: 6, code: 'N', name: 'JUL' },  // July
+    { monthNum: 8, code: 'U', name: 'SEP' },  // September
+    { monthNum: 11, code: 'Z', name: 'DEC' }, // December
+  ];
+
+  // Find next delivery month
+  let targetYear = year;
+  let targetMonth = deliveryMonths[0];
+
+  for (const dm of deliveryMonths) {
+    // If we're before this delivery month (with some buffer for FND)
+    if (month < dm.monthNum || (month === dm.monthNum && now.getDate() < 20)) {
+      targetMonth = dm;
+      break;
+    }
+  }
+
+  // If we're past all delivery months this year, use next year's March
+  if (month >= 11 || (month === 11 && now.getDate() >= 20)) {
+    targetYear = year + 1;
+    targetMonth = deliveryMonths[0]; // March
+  }
+
+  const yearCode = String(targetYear).slice(-2);
+  const symbol = `SI${targetMonth.code}${yearCode}.CMX`;
+  const contract = `${targetMonth.name} ${yearCode}`;
+
+  return { symbol, contract };
+}
+
+/** Fetch front-month futures price from Yahoo Finance */
 async function fetchFuturesPrice(): Promise<{
   success: boolean;
   price: number;
   contract: string;
+  sourceUrl: string;
 }> {
+  const { symbol, contract } = getYahooFuturesSymbol();
+  const url = `${YAHOO_FINANCE_BASE}/${symbol}?interval=1d&range=1d`;
+
   try {
-    const response = await fetch(CME_SETTLEMENTS_URL, {
+    const response = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
         'Accept': 'application/json',
       },
       next: { revalidate: 0 },
     });
 
     if (!response.ok) {
-      return { success: false, price: 0, contract: '' };
+      return { success: false, price: 0, contract: '', sourceUrl: url };
     }
 
     const data = await response.json();
-    const settlements = data.settlements ?? [];
+    const meta = data?.chart?.result?.[0]?.meta;
 
-    // Find front-month contract (first with volume)
-    for (const settlement of settlements) {
-      const month = settlement.month ?? '';
-      const settle = parseFloat(settlement.settle ?? '0');
-
-      if (settle > 0 && month) {
-        return {
-          success: true,
-          price: settle,
-          contract: month,
-        };
-      }
+    if (!meta || typeof meta.regularMarketPrice !== 'number') {
+      return { success: false, price: 0, contract: '', sourceUrl: url };
     }
 
-    return { success: false, price: 0, contract: '' };
+    return {
+      success: true,
+      price: meta.regularMarketPrice,
+      contract: meta.longName ?? contract,
+      sourceUrl: `https://finance.yahoo.com/quote/${symbol}`,
+    };
   } catch {
-    return { success: false, price: 0, contract: '' };
+    return { success: false, price: 0, contract: '', sourceUrl: url };
   }
 }
 
