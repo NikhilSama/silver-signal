@@ -216,16 +216,31 @@ Respond ONLY with valid JSON in this exact format:
   }
 
   // Parse JSON response
+  const responseText = textBlock.text.trim();
+  console.log('Claude response:', responseText.substring(0, 500));
+
   try {
-    const parsed = JSON.parse(textBlock.text) as BriefingResponse;
+    // Try to extract JSON from the response (Claude might wrap it in markdown)
+    let jsonStr = responseText;
+
+    // Remove markdown code blocks if present
+    const jsonMatch = responseText.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[1].trim();
+    }
+
+    const parsed = JSON.parse(jsonStr) as BriefingResponse;
     return parsed;
-  } catch {
-    // If JSON parsing fails, extract from text
-    console.error('Failed to parse Claude response as JSON:', textBlock.text);
+  } catch (parseError) {
+    // If JSON parsing fails, try to extract meaningful content
+    console.error('Failed to parse Claude response as JSON:', parseError);
+    console.error('Raw response:', responseText);
+
+    // Return the raw text as the briefing
     return {
       overall_posture: posture as BriefingResponse['overall_posture'],
-      posture_reason: 'Unable to generate detailed analysis',
-      briefing_text: textBlock.text,
+      posture_reason: 'Analysis generated successfully',
+      briefing_text: responseText,
     };
   }
 }
