@@ -9,6 +9,7 @@ import {
   scoreFNDRatio,
   scoreCVOLProxy,
 } from '@/lib/api/derived';
+import { fetchSofrRate } from '@/lib/api/derived/sofrFetcher';
 import { insertSnapshot, getLatestSnapshot, getSnapshotHistory } from '@/lib/db/queries';
 import { INDICATOR_IDS } from '@/types/indicator';
 import type { IndicatorSnapshotInsert } from '@/types/database';
@@ -60,15 +61,19 @@ async function computeAndStoreLeaseRate(): Promise<ComputeResult> {
 
     const spotData = spotSnapshot.raw_value as {
       spotPrice?: number;
-      spread?: number;
+      frontMonthFuturesPrice?: number;
       daysToExpiry?: number;
     };
 
     const spotPrice = spotData.spotPrice ?? 30;
-    const spread = spotData.spread ?? 0;
+    const futuresPrice = spotData.frontMonthFuturesPrice ?? spotPrice;
     const daysToExpiry = spotData.daysToExpiry ?? 30;
 
-    const data = computeLeaseRate(spotPrice, spread, daysToExpiry);
+    // Fetch current SOFR rate for lease rate calculation
+    const sofrResult = await fetchSofrRate();
+    const sofrRate = sofrResult.rate;
+
+    const data = computeLeaseRate(spotPrice, futuresPrice, daysToExpiry, sofrRate);
     const score = scoreLeaseRate(data);
 
     const snapshot: IndicatorSnapshotInsert = {
@@ -79,7 +84,7 @@ async function computeAndStoreLeaseRate(): Promise<ComputeResult> {
       computed_value: data.impliedLeaseRate,
       signal: score.signal,
       signal_reason: score.reason,
-      source_url: 'derived from backwardation',
+      source_url: 'derived from spot/futures spread',
       fetch_status: 'success',
       error_detail: null,
     };
@@ -159,11 +164,11 @@ async function computeAndStoreCVOLProxy(): Promise<ComputeResult> {
   const indicatorId = INDICATOR_IDS.CVOL;
 
   try {
-    // Fetch daily OHLC
+    // Fetch daily OHLC from Yahoo Finance
     const ohlc = await fetchDailyOHLC();
 
-    if (ohlc.error) {
-      return { indicatorId, success: false, error: ohlc.error };
+    if (ohlc.error || ohlc.close === 0) {
+      return { indicatorId, success: false, error: ohlc.error ?? 'No OHLC data' };
     }
 
     // Get prior CVOL data for trend comparison
@@ -173,17 +178,23 @@ async function computeAndStoreCVOLProxy(): Promise<ComputeResult> {
       .filter((r): r is number => typeof r === 'number');
 
     const data = computeCVOLProxy(ohlc.high, ohlc.low, ohlc.close, priorRanges);
+    // Add data source to the data object
+    const dataWithSource = { ...data, dataSource: ohlc.source };
     const score = scoreCVOLProxy(data);
+
+    const sourceUrl = ohlc.source.includes('SI=F')
+      ? 'https://finance.yahoo.com/quote/SI=F'
+      : 'https://finance.yahoo.com/quote/SLV';
 
     const snapshot: IndicatorSnapshotInsert = {
       indicator_id: indicatorId,
       fetched_at: new Date(),
       data_date: data.reportDate,
-      raw_value: { ...data },
+      raw_value: { ...dataWithSource },
       computed_value: data.rangePercent,
       signal: score.signal,
       signal_reason: score.reason,
-      source_url: 'derived from daily OHLC',
+      source_url: sourceUrl,
       fetch_status: 'success',
       error_detail: null,
     };

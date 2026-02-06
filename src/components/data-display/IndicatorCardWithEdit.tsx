@@ -46,10 +46,15 @@ interface SourceInfo {
 
 // Derivation formulas for derived indicators
 const DERIVATION_FORMULAS: Record<string, { display: string; formula: string; inputs: string }> = {
+  'derived from spot/futures spread': {
+    display: 'Derived',
+    formula: 'SOFR - ((Futures/Spot - 1) × (360/days) × 100)',
+    inputs: 'Inputs: Spot price, Futures price, Days to expiry, SOFR rate',
+  },
   'derived from backwardation': {
     display: 'Derived',
-    formula: '(backwardation ÷ spot_price) × (365 ÷ days_to_expiry) × 100',
-    inputs: 'Inputs: Backwardation spread, Spot price, Days to front-month expiry',
+    formula: 'SOFR - ((Futures/Spot - 1) × (360/days) × 100)',
+    inputs: 'Inputs: Spot price, Futures price, Days to expiry, SOFR rate',
   },
   'derived from OI and vault data': {
     display: 'Derived',

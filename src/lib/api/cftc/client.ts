@@ -2,8 +2,7 @@ import type { CFTCCOTRow, COTFetchResult } from './types';
 import { parseCOTRows } from './parser';
 
 const CFTC_BASE_URL = 'https://publicreporting.cftc.gov/resource/6dca-aqww.json';
-const SILVER_COMMODITY = 'SILVER';
-const COMEX_EXCHANGE = 'COMMODITY EXCHANGE';
+const SILVER_EXCHANGE_NAME = 'SILVER - COMMODITY EXCHANGE INC.';
 const DEFAULT_LIMIT = 1000;
 const FETCH_TIMEOUT_MS = 15000;
 
@@ -15,8 +14,8 @@ function buildUrl(limit: number, offset: number, startDate?: string): string {
     $order: 'report_date_as_yyyy_mm_dd DESC',
   });
 
-  // Filter for COMEX silver
-  let whereClause = `commodity_name='${SILVER_COMMODITY}' AND market_and_exchange_names LIKE '%${COMEX_EXCHANGE}%'`;
+  // Filter for COMEX silver (exclude MICRO SILVER contract)
+  let whereClause = `market_and_exchange_names='${SILVER_EXCHANGE_NAME}'`;
 
   if (startDate) {
     whereClause += ` AND report_date_as_yyyy_mm_dd >= '${startDate}'`;

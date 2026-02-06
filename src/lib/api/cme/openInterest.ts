@@ -1,173 +1,66 @@
-import * as cheerio from 'cheerio';
-import type { OpenInterestData, ContractMonthOI, CMEFetchResult } from './types';
-import { fetchOIViaBrowser } from '../browseruse';
+import type { OpenInterestData, CMEFetchResult } from './types';
 
-// CME daily volume/OI page for silver futures
-const OI_PAGE_URL = 'https://www.cmegroup.com/markets/metals/precious/silver.volume.html';
-// Alternative: settlement data page
-const SETTLEMENT_URL = 'https://www.cmegroup.com/CmeWS/mvc/Settlements/Futures/Settlements/5454/FUT';
-// CFTC COT API (weekly, but reliable fallback)
+// CFTC COT API (primary - FREE, no API key, reliable weekly data)
 const CFTC_API_URL = 'https://publicreporting.cftc.gov/resource/6dca-aqww.json';
+// CME settlements API (secondary fallback - often blocked)
+const SETTLEMENT_URL = 'https://www.cmegroup.com/CmeWS/mvc/Settlements/Futures/Settlements/5454/FUT';
 
-/** Fetch Open Interest data from CME or fallback to CFTC */
+const FETCH_TIMEOUT_MS = 15000;
+
+/**
+ * Fetch Open Interest data - CFTC Socrata API primary, CME as fallback
+ *
+ * Per Excel spec: CFTC Socrata is FREE and reliable (weekly data)
+ * Databento would cost $179/mo and CME direct APIs are typically blocked
+ */
 export async function fetchOpenInterest(): Promise<CMEFetchResult<OpenInterestData>> {
   try {
-    // Try the CME settlements API first
-    const cmeResult = await fetchFromSettlementsAPI();
+    // Primary: CFTC Socrata API (FREE, no auth, reliable)
+    const cftcResult = await fetchFromCFTCSocrata();
+    if (cftcResult.success && cftcResult.data && cftcResult.data.totalOI > 0) {
+      console.log('[OpenInterest] Using CFTC Socrata data');
+      return cftcResult;
+    }
+    console.log('[OpenInterest] CFTC failed, trying CME API...');
+
+    // Secondary: CME settlements API (often blocked)
+    const cmeResult = await fetchFromCMESettlements();
     if (cmeResult.success && cmeResult.data && cmeResult.data.totalOI > 0) {
+      console.log('[OpenInterest] Using CME settlements data');
       return cmeResult;
     }
 
-    // Try Browser Use Cloud (real browser automation)
-    const browserResult = await fetchOIViaBrowser();
-    if (browserResult.success && browserResult.data && browserResult.data > 0) {
-      return {
-        success: true,
-        data: {
-          reportDate: new Date(),
-          totalOI: browserResult.data,
-          byMonth: [],
-        },
-        sourceUrl: browserResult.sourceUrl || OI_PAGE_URL,
-      };
-    }
-
-    // Fallback to CFTC COT data (weekly but reliable)
-    const cftcResult = await fetchFromCFTC();
-    if (cftcResult.success) return cftcResult;
-
-    // Try scraping volume page (usually won't work if API is blocked)
-    const volumeResult = await fetchFromVolumePage();
-    if (volumeResult.success && volumeResult.data && volumeResult.data.totalOI > 0) {
-      return volumeResult;
-    }
-
-    // Last resort: use known approximate OI (COMEX silver typically 140k-160k contracts)
-    console.log('[OpenInterest] Using hardcoded fallback');
-    return {
-      success: true,
-      data: {
-        reportDate: new Date(),
-        totalOI: 143000, // Approximate COMEX silver OI
-        byMonth: [],
-      },
-      sourceUrl: 'hardcoded-fallback',
-    };
+    // Return CFTC error if both failed
+    return cftcResult.success ? cftcResult : cmeResult;
   } catch (error) {
     return {
       success: false,
       data: null,
       error: error instanceof Error ? error.message : 'Unknown fetch error',
-      sourceUrl: OI_PAGE_URL,
+      sourceUrl: CFTC_API_URL,
     };
   }
 }
 
-/** Fetch OI from CME settlements API (JSON) */
-async function fetchFromSettlementsAPI(): Promise<CMEFetchResult<OpenInterestData>> {
-  try {
-    const response = await fetch(SETTLEMENT_URL, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
-        'Accept': 'application/json',
-      },
-      next: { revalidate: 0 },
-    });
-
-    if (!response.ok) {
-      return {
-        success: false,
-        data: null,
-        error: `HTTP ${response.status}`,
-        sourceUrl: SETTLEMENT_URL,
-      };
-    }
-
-    const json = await response.json() as Record<string, unknown>;
-
-    // Check if response is a blocking/error message (CME returns 200 with error JSON)
-    if (json.message && typeof json.message === 'string') {
-      return {
-        success: false,
-        data: null,
-        error: 'CME API blocked',
-        sourceUrl: SETTLEMENT_URL,
-      };
-    }
-
-    const data = parseSettlementsJSON(json);
-
-    return {
-      success: true,
-      data,
-      sourceUrl: SETTLEMENT_URL,
-    };
-  } catch (error) {
-    return {
-      success: false,
-      data: null,
-      error: error instanceof Error ? error.message : 'API error',
-      sourceUrl: SETTLEMENT_URL,
-    };
-  }
-}
-
-/** Parse CME settlements API response */
-function parseSettlementsJSON(json: unknown): OpenInterestData {
-  const data = json as { settlements?: SettlementRow[] };
-  const settlements = data.settlements || [];
-
-  const byMonth: ContractMonthOI[] = [];
-  let totalOI = 0;
-
-  for (const row of settlements) {
-    if (!row.month || row.month === 'TOTAL') continue;
-
-    const oi = parseNumber(row.openInterest);
-    const volume = parseNumber(row.volume);
-    const settlement = parseNumber(row.settle);
-
-    // Parse month like "MAR 26" or "MARU6"
-    const { month, year } = parseContractMonth(row.month);
-
-    if (month && year) {
-      byMonth.push({
-        month: `${month} ${year}`,
-        year: 2000 + year,
-        oi,
-        volume,
-        settlement,
-      });
-      totalOI += oi;
-    }
-  }
-
-  return {
-    reportDate: new Date(),
-    totalOI,
-    byMonth,
-  };
-}
-
-interface SettlementRow {
-  month?: string;
-  openInterest?: string | number;
-  volume?: string | number;
-  settle?: string | number;
-}
-
-/** Fetch OI from CFTC COT API (weekly data, but reliable) */
-async function fetchFromCFTC(): Promise<CMEFetchResult<OpenInterestData>> {
-  const url = `${CFTC_API_URL}?$where=commodity_name='SILVER' AND market_and_exchange_names LIKE '%COMMODITY EXCHANGE%'&$order=report_date_as_yyyy_mm_dd DESC&$limit=1`;
+/** Fetch OI from CFTC Socrata API (weekly COT data) */
+async function fetchFromCFTCSocrata(): Promise<CMEFetchResult<OpenInterestData>> {
+  // Filter for COMEX Silver futures only (contract code 084691)
+  const whereClause = "commodity_name='SILVER' AND cftc_contract_market_code='084691'";
+  const url = `${CFTC_API_URL}?$where=${encodeURIComponent(whereClause)}&$order=report_date_as_yyyy_mm_dd DESC&$limit=1`;
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
     const response = await fetch(url, {
+      signal: controller.signal,
       headers: {
-        'User-Agent': 'SilverMonitor/1.0 (compatible)',
+        'User-Agent': 'SilverMonitor/1.0',
         Accept: 'application/json',
       },
-      next: { revalidate: 0 },
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       return {
@@ -197,15 +90,16 @@ async function fetchFromCFTC(): Promise<CMEFetchResult<OpenInterestData>> {
       data: {
         reportDate,
         totalOI,
-        byMonth: [], // CFTC doesn't provide per-month breakdown
+        byMonth: [], // CFTC provides aggregate OI only
       },
       sourceUrl: url,
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : 'CFTC fetch error';
     return {
       success: false,
       data: null,
-      error: error instanceof Error ? error.message : 'CFTC fetch error',
+      error: message.includes('abort') ? 'Request timeout' : message,
       sourceUrl: url,
     };
   }
@@ -216,92 +110,90 @@ interface CFTCRow {
   open_interest_all: string | number;
 }
 
-/** Fallback: scrape the volume page */
-async function fetchFromVolumePage(): Promise<CMEFetchResult<OpenInterestData>> {
-  const response = await fetch(OI_PAGE_URL, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
-    },
-    next: { revalidate: 0 },
-  });
+/** Fetch OI from CME settlements API (secondary fallback) */
+async function fetchFromCMESettlements(): Promise<CMEFetchResult<OpenInterestData>> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-  if (!response.ok) {
+    const response = await fetch(SETTLEMENT_URL, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
+        Accept: 'application/json',
+      },
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      return {
+        success: false,
+        data: null,
+        error: `CME HTTP ${response.status}`,
+        sourceUrl: SETTLEMENT_URL,
+      };
+    }
+
+    const json = await response.json() as CMESettlementsResponse;
+
+    // CME often returns 200 with blocking message
+    if (json.message && typeof json.message === 'string') {
+      return {
+        success: false,
+        data: null,
+        error: 'CME API blocked',
+        sourceUrl: SETTLEMENT_URL,
+      };
+    }
+
+    const data = parseSettlementsResponse(json);
+    return {
+      success: true,
+      data,
+      sourceUrl: SETTLEMENT_URL,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'CME API error';
     return {
       success: false,
       data: null,
-      error: `HTTP ${response.status}`,
-      sourceUrl: OI_PAGE_URL,
+      error: message.includes('abort') ? 'Request timeout' : message,
+      sourceUrl: SETTLEMENT_URL,
     };
   }
-
-  const html = await response.text();
-  const data = parseVolumePage(html);
-
-  return {
-    success: true,
-    data,
-    sourceUrl: OI_PAGE_URL,
-  };
 }
 
-/** Parse the volume page HTML for OI data */
-function parseVolumePage(html: string): OpenInterestData {
-  const $ = cheerio.load(html);
-  const byMonth: ContractMonthOI[] = [];
+interface CMESettlementsResponse {
+  message?: string;
+  settlements?: CMESettlementRow[];
+}
+
+interface CMESettlementRow {
+  month?: string;
+  openInterest?: string | number;
+  volume?: string | number;
+  settle?: string | number;
+}
+
+/** Parse CME settlements response */
+function parseSettlementsResponse(json: CMESettlementsResponse): OpenInterestData {
+  const settlements = json.settlements || [];
   let totalOI = 0;
 
-  // Look for table rows with OI data
-  $('table tbody tr').each((_, row) => {
-    const cells = $(row).find('td');
-    if (cells.length < 4) return;
-
-    const monthText = $(cells[0]).text().trim();
-    const oiText = $(cells[2]).text().trim(); // OI is typically 3rd column
-    const volumeText = $(cells[1]).text().trim();
-
-    const { month, year } = parseContractMonth(monthText);
-    const oi = parseNumber(oiText);
-    const volume = parseNumber(volumeText);
-
-    if (month && year && oi > 0) {
-      byMonth.push({
-        month: `${month} ${year}`,
-        year: 2000 + year,
-        oi,
-        volume,
-        settlement: 0,
-      });
-      totalOI += oi;
-    }
-  });
+  for (const row of settlements) {
+    if (!row.month || row.month === 'TOTAL') continue;
+    totalOI += parseNumber(row.openInterest);
+  }
 
   return {
     reportDate: new Date(),
     totalOI,
-    byMonth,
+    byMonth: [], // Simplified - not parsing per-month for now
   };
 }
 
-/** Parse contract month string like "MAR 26" or "MARH6" */
-function parseContractMonth(input: string): { month: string | null; year: number | null } {
-  const cleaned = input.toUpperCase().trim();
-
-  // Try "MAR 26" format
-  const spaceMatch = cleaned.match(/^([A-Z]{3})\s*(\d{2})$/);
-  if (spaceMatch) {
-    return { month: spaceMatch[1], year: parseInt(spaceMatch[2], 10) };
-  }
-
-  // Try "MARH6" format (month code + year)
-  const codeMatch = cleaned.match(/^([A-Z]{3})[A-Z](\d)$/);
-  if (codeMatch) {
-    return { month: codeMatch[1], year: parseInt(`2${codeMatch[2]}`, 10) };
-  }
-
-  return { month: null, year: null };
-}
-
-/** Parse a number from string, handling commas */
+/** Parse a number from string or number, handling commas */
 function parseNumber(value: unknown): number {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {

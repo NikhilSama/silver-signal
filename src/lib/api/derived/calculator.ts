@@ -3,31 +3,40 @@ import type { LeaseRateData, FNDRatioData, CVOLProxyData } from './types';
 const OUNCES_PER_CONTRACT = 5000;
 
 /**
- * Compute implied lease rate from backwardation spread (#9)
+ * Compute implied lease rate from SOFR minus forward rate (#9)
  *
- * Formula: (backwardation / spot) * (365 / days_to_expiry) * 100
- * This approximates the cost of borrowing physical silver
+ * Excel spec: Forward Rate = (Futures/Spot - 1) x (360/days) x 100
+ *             Lease Rate = SOFR - Forward Rate
+ *
+ * In contango (futures > spot): Forward rate positive, lease rate lower (normal)
+ * In backwardation (spot > futures): Forward rate negative, lease rate higher (scarcity)
+ *
+ * A high lease rate indicates nobody is lending physical silver - scarcity signal.
  */
 export function computeLeaseRate(
   spotPrice: number,
-  spread: number, // positive = backwardation
-  daysToExpiry: number
+  futuresPrice: number,
+  daysToExpiry: number,
+  sofrRate: number = 4.3 // default SOFR rate if fetch fails
 ): LeaseRateData {
-  // Avoid division by zero
   const safeDays = Math.max(daysToExpiry, 1);
   const safeSpot = Math.max(spotPrice, 0.01);
+  const safeFutures = Math.max(futuresPrice, 0.01);
 
-  // Only compute if in backwardation (positive spread)
-  let impliedLeaseRate = 0;
-  if (spread > 0) {
-    impliedLeaseRate = (spread / safeSpot) * (365 / safeDays) * 100;
-  }
+  // Forward rate per Excel spec: (Futures/Spot - 1) x (360/days) x 100
+  const forwardRate = ((safeFutures / safeSpot) - 1) * (360 / safeDays) * 100;
+
+  // Implied lease rate = SOFR - Forward Rate
+  // Positive when in backwardation (scarcity), lower in contango (normal)
+  const impliedLeaseRate = sofrRate - forwardRate;
 
   return {
     reportDate: new Date(),
-    impliedLeaseRate,
-    backwardation: spread,
+    impliedLeaseRate: Math.max(impliedLeaseRate, 0), // Floor at 0%
+    forwardRate,
+    sofrRate,
     spotPrice,
+    futuresPrice,
     daysToExpiry,
   };
 }
@@ -131,38 +140,4 @@ function getNextFNDDate(): Date {
 
   // If past all this year's FNDs, return next year's March FND
   return new Date(year + 1, 1, 28);
-}
-
-/** Fetch daily OHLC data for CVOL proxy calculation */
-export async function fetchDailyOHLC(): Promise<{
-  high: number;
-  low: number;
-  close: number;
-  error?: string;
-}> {
-  // Try metals.live API for OHLC
-  try {
-    const response = await fetch('https://api.metals.live/v1/spot/silver', {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)' },
-      next: { revalidate: 0 },
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      const price = Array.isArray(data) ? data[0] : data;
-
-      // Some APIs provide OHLC, others just current price
-      const high = price.high ?? price.price ?? 30;
-      const low = price.low ?? price.price ?? 30;
-      const close = price.close ?? price.price ?? 30;
-
-      return { high, low, close };
-    }
-  } catch {
-    // Fall through
-  }
-
-  // Fallback: use current price as all OHLC values
-  // This means range will be 0 until we get proper OHLC data
-  return { high: 30, low: 30, close: 30 };
 }

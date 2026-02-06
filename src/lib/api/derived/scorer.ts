@@ -13,9 +13,12 @@ export interface ScoreResult {
  * RED: Above 10% (acute scarcity), above 50% = crisis
  */
 export function scoreLeaseRate(current: LeaseRateData): ScoreResult {
-  const { impliedLeaseRate, backwardation } = current;
+  const { impliedLeaseRate, futuresPrice, spotPrice } = current;
 
-  // No backwardation = no lease rate signal
+  // Backwardation = spot > futures (negative forward premium)
+  const backwardation = spotPrice - futuresPrice;
+
+  // No backwardation = no lease rate signal (contango is normal)
   if (backwardation <= 0) {
     return {
       signal: 'green',
