@@ -6,12 +6,19 @@ import { IndicatorGrid } from '@/components/data-display/IndicatorGrid';
 import { UpcomingEvents } from '@/components/data-display/UpcomingEvents';
 import { DailyBriefing } from '@/components/data-display/DailyBriefing';
 import { INDICATOR_METADATA } from '@/lib/constants/indicators';
+import { GOLD_INDICATOR_METADATA } from '@/lib/constants/indicators-gold';
 import { INDICATOR_IDS } from '@/types/indicator';
+import { parseMetal, getMetalConfig } from '@/lib/constants/metals';
+import type { Metal } from '@/lib/constants/metals';
 import type { IndicatorCardData, SlamRiskItem } from '@/types/indicator';
-import type { KeyDate, DailyBriefing as DailyBriefingType, IndicatorSnapshot } from '@/types/database';
+import type { KeyDate, DailyBriefing as DailyBriefingType, IndicatorSnapshot, IndicatorMetadata } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
+
+interface PageProps {
+  searchParams: Promise<{ metal?: string }>;
+}
 
 /** Check if database is configured */
 function isDatabaseConfigured(): boolean {
@@ -21,9 +28,15 @@ function isDatabaseConfigured(): boolean {
 // Indicators that support browser automation
 const BROWSER_PROMPT_INDICATORS = new Set([1, 6]); // Open Interest, Margins
 
+/** Get metadata for a metal */
+function getMetadataForMetal(metal: Metal): Omit<IndicatorMetadata, 'indicator_id' | 'metal'>[] {
+  return metal === 'gold' ? GOLD_INDICATOR_METADATA : INDICATOR_METADATA;
+}
+
 /** Create fallback card data when database is not available */
-function createFallbackCards(): IndicatorCardData[] {
-  return INDICATOR_METADATA.map((meta, index) => ({
+function createFallbackCards(metal: Metal): IndicatorCardData[] {
+  const metadata = getMetadataForMetal(metal);
+  return metadata.map((meta, index) => ({
     indicatorId: index + 1,
     name: meta.name,
     shortDescription: meta.short_description,
@@ -51,17 +64,17 @@ interface SnapshotData {
   priorSnapshots: (IndicatorSnapshot | null)[];
 }
 
-async function getIndicatorData(): Promise<SnapshotData | null> {
+async function getIndicatorData(metal: Metal): Promise<SnapshotData | null> {
   if (!isDatabaseConfigured()) return null;
 
   try {
     const { getLatestSnapshots, getSnapshotHistory } = await import('@/lib/db/queries');
 
-    const snapshots = await getLatestSnapshots();
+    const snapshots = await getLatestSnapshots(metal);
 
     const priorSnapshots = await Promise.all(
       [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(async (id) => {
-        const history = await getSnapshotHistory(id, 14);
+        const history = await getSnapshotHistory(id, 14, metal);
         const weekAgo = new Date();
         weekAgo.setDate(weekAgo.getDate() - 7);
         return history.find(
@@ -76,23 +89,36 @@ async function getIndicatorData(): Promise<SnapshotData | null> {
   }
 }
 
-async function getIndicatorCards(data: SnapshotData | null): Promise<IndicatorCardData[]> {
-  if (!data) return createFallbackCards();
+async function getIndicatorCards(
+  data: SnapshotData | null,
+  metal: Metal
+): Promise<IndicatorCardData[]> {
+  if (!data) return createFallbackCards(metal);
 
   try {
     const { getAllMetadata, getAllBrowserPrompts } = await import('@/lib/db/queries');
     const { transformToCardData } = await import('@/lib/utils/indicatorTransform');
 
-    const metadata = await getAllMetadata();
-    if (metadata.length === 0) return createFallbackCards();
+    const metadata = await getAllMetadata(metal);
 
-    // Get browser prompts to determine which indicators have them configured
+    // If no metadata in DB, use constants as fallback
+    if (metadata.length === 0) {
+      const fallbackMeta = getMetadataForMetal(metal);
+      return fallbackMeta.map((meta, index) => {
+        const metaId = index + 1;
+        const snapshot = data.snapshots.find((s) => Number(s.indicator_id) === metaId) ?? null;
+        const priorSnapshot = data.priorSnapshots[metaId - 1];
+        const fullMeta = { ...meta, indicator_id: metaId, metal };
+        return transformToCardData(metaId, snapshot, fullMeta, priorSnapshot, BROWSER_PROMPT_INDICATORS.has(metaId));
+      });
+    }
+
+    // Get browser prompts
     let browserPromptIds = new Set<number>();
     try {
-      const prompts = await getAllBrowserPrompts();
+      const prompts = await getAllBrowserPrompts(metal);
       browserPromptIds = new Set(prompts.map(p => p.indicator_id));
     } catch {
-      // If browser_prompts table doesn't exist yet, use defaults
       browserPromptIds = BROWSER_PROMPT_INDICATORS;
     }
 
@@ -106,25 +132,25 @@ async function getIndicatorCards(data: SnapshotData | null): Promise<IndicatorCa
 
     return cards;
   } catch {
-    return createFallbackCards();
+    return createFallbackCards(metal);
   }
 }
 
-async function getEvents(): Promise<KeyDate[]> {
+async function getEvents(metal: Metal): Promise<KeyDate[]> {
   if (!isDatabaseConfigured()) return [];
   try {
     const { getUpcomingDates } = await import('@/lib/db/queries');
-    return await getUpcomingDates(30);
+    return await getUpcomingDates(30, metal);
   } catch {
     return [];
   }
 }
 
-async function getBriefing(): Promise<DailyBriefingType | null> {
+async function getBriefing(metal: Metal): Promise<DailyBriefingType | null> {
   if (!isDatabaseConfigured()) return null;
   try {
     const { getLatestBriefing } = await import('@/lib/db/queries');
-    return await getLatestBriefing();
+    return await getLatestBriefing(metal);
   } catch {
     return null;
   }
@@ -313,14 +339,18 @@ function checkThinLiquidity(upcomingDates: KeyDate[]): SlamRiskItem {
   return item;
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({ searchParams }: PageProps) {
+  const params = await searchParams;
+  const metal = parseMetal(params.metal);
+  const config = getMetalConfig(metal);
+
   const [indicatorData, upcomingEvents, briefing] = await Promise.all([
-    getIndicatorData(),
-    getEvents(),
-    getBriefing(),
+    getIndicatorData(metal),
+    getEvents(metal),
+    getBriefing(metal),
   ]);
 
-  const cards = await getIndicatorCards(indicatorData);
+  const cards = await getIndicatorCards(indicatorData, metal);
   const slamRiskItems = computeSlamRisk(indicatorData, upcomingEvents);
 
   const { posture, reason, count } = calculatePosture(cards);
@@ -340,7 +370,7 @@ export default async function DashboardPage() {
 
   return (
     <>
-      <Header spotPrice={spotPrice} lastUpdated={lastUpdated} />
+      <Header metal={metal} config={config} spotPrice={spotPrice} lastUpdated={lastUpdated} />
 
       <PageShell>
         <PostureBanner posture={posture} reason={reason} indicatorCount={count} />

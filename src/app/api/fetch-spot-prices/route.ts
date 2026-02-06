@@ -1,23 +1,29 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 import { fetchSpotPrices, scoreBackwardation } from '@/lib/api/spotprices';
 import { insertSnapshot } from '@/lib/db/queries';
 import { INDICATOR_IDS } from '@/types/indicator';
-import type { IndicatorSnapshotInsert } from '@/types/database';
+import { getMetalConfig, parseMetal } from '@/lib/constants/metals';
+import type { IndicatorSnapshotInsert, Metal } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const metal = parseMetal(searchParams.get('metal'));
+  const config = getMetalConfig(metal);
+
   const indicatorId = INDICATOR_IDS.BACKWARDATION;
 
   try {
-    const result = await fetchSpotPrices();
+    const result = await fetchSpotPrices(config);
 
     if (!result.success || !result.data) {
-      await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl);
+      await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl, metal);
       return NextResponse.json({
         success: false,
+        metal: config.displayName,
         indicatorId,
         error: result.error,
       });
@@ -27,6 +33,7 @@ export async function GET(): Promise<NextResponse> {
 
     const snapshot: IndicatorSnapshotInsert = {
       indicator_id: indicatorId,
+      metal,
       fetched_at: new Date(),
       data_date: result.data.reportDate,
       raw_value: { ...result.data },
@@ -42,6 +49,7 @@ export async function GET(): Promise<NextResponse> {
 
     return NextResponse.json({
       success: true,
+      metal: config.displayName,
       indicatorId,
       signal: score.signal,
       spotPrice: result.data.spotPrice,
@@ -51,10 +59,11 @@ export async function GET(): Promise<NextResponse> {
     });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-    await insertErrorSnapshot(indicatorId, errorMsg, 'metals.live');
+    await insertErrorSnapshot(indicatorId, errorMsg, 'goldprice.org', metal);
 
     return NextResponse.json({
       success: false,
+      metal: config.displayName,
       indicatorId,
       error: errorMsg,
     });
@@ -64,10 +73,12 @@ export async function GET(): Promise<NextResponse> {
 async function insertErrorSnapshot(
   indicatorId: number,
   error: string,
-  sourceUrl: string
+  sourceUrl: string,
+  metal: Metal
 ): Promise<void> {
   const snapshot: IndicatorSnapshotInsert = {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: new Date(),
     raw_value: { error },

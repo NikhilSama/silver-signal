@@ -1,8 +1,12 @@
 import type { DeliveryData, ClearingMemberDelivery } from './types';
 import { getFrontMonthCode } from './types';
+import type { Metal } from '@/lib/constants/metals';
 
-/** Parse the delivery PDF buffer and extract silver delivery data */
-export async function parseDeliveryPDF(buffer: ArrayBuffer): Promise<DeliveryData> {
+/** Parse the delivery PDF buffer and extract metal delivery data */
+export async function parseDeliveryPDF(
+  buffer: ArrayBuffer,
+  metal: Metal = 'silver'
+): Promise<DeliveryData> {
   const { PDFParse } = await import('pdf-parse');
   const uint8Array = new Uint8Array(buffer);
   const parser = new PDFParse(uint8Array);
@@ -11,12 +15,13 @@ export async function parseDeliveryPDF(buffer: ArrayBuffer): Promise<DeliveryDat
   const textResult = await parser.getText();
   await parser.destroy();
 
-  return extractSilverData(textResult.text);
+  return extractMetalData(textResult.text, metal);
 }
 
-/** Extract silver delivery data from PDF text */
-function extractSilverData(text: string): DeliveryData {
+/** Extract metal delivery data from PDF text */
+function extractMetalData(text: string, metal: Metal): DeliveryData {
   const result = createDefaultData();
+  const metalLabel = metal === 'silver' ? 'SILVER' : 'GOLD';
 
   // Extract report date from "BUSINESS DATE: MM/DD/YYYY"
   const dateMatch = text.match(/BUSINESS DATE:\s*(\d{2}\/\d{2}\/\d{4})/);
@@ -24,23 +29,26 @@ function extractSilverData(text: string): DeliveryData {
     result.reportDate = parseDate(dateMatch[1]);
   }
 
-  // Find silver section - look for "SILVER FUTURES" contract
-  const silverMatch = text.match(
-    /CONTRACT:.*?SILVER FUTURES[\s\S]*?TOTAL:\s*(\d+)\s+(\d+)[\s\S]*?MONTH TO DATE:\s*([\d,]+)/i
+  // Find metal section - look for "SILVER FUTURES" or "GOLD FUTURES" contract
+  const metalRegex = new RegExp(
+    `CONTRACT:.*?${metalLabel} FUTURES[\\s\\S]*?TOTAL:\\s*(\\d+)\\s+(\\d+)[\\s\\S]*?MONTH TO DATE:\\s*([\\d,]+)`,
+    'i'
   );
+  const metalMatch = text.match(metalRegex);
 
-  if (silverMatch) {
-    result.issues = parseInt(silverMatch[1], 10);
-    result.stops = parseInt(silverMatch[2], 10);
-    const mtd = parseInt(silverMatch[3].replace(/,/g, ''), 10);
+  if (metalMatch) {
+    result.issues = parseInt(metalMatch[1], 10);
+    result.stops = parseInt(metalMatch[2], 10);
+    const mtd = parseInt(metalMatch[3].replace(/,/g, ''), 10);
     result.cumulativeIssues = mtd;
     result.cumulativeStops = mtd;
-    result.topIssuers = extractClearingMembers(text, 'issued');
-    result.topStoppers = extractClearingMembers(text, 'stopped');
+    result.topIssuers = extractClearingMembers(text, 'issued', metal);
+    result.topStoppers = extractClearingMembers(text, 'stopped', metal);
   }
 
   // Extract contract month from "CONTRACT: FEBRUARY 2026 COMEX 5000 SILVER FUTURES"
-  const contractMatch = text.match(/CONTRACT:\s*(\w+)\s+(\d{4}).*?SILVER FUTURES/i);
+  const contractRegex = new RegExp(`CONTRACT:\\s*(\\w+)\\s+(\\d{4}).*?${metalLabel} FUTURES`, 'i');
+  const contractMatch = text.match(contractRegex);
   if (contractMatch) {
     const monthAbbr = contractMatch[1].substring(0, 3).toUpperCase();
     const yearShort = contractMatch[2].substring(2);
@@ -74,14 +82,15 @@ function parseDate(dateStr: string): Date {
 /** Extract clearing member deliveries from PDF text */
 function extractClearingMembers(
   text: string,
-  type: 'issued' | 'stopped'
+  type: 'issued' | 'stopped',
+  metal: Metal = 'silver'
 ): ClearingMemberDelivery[] {
   const members: ClearingMemberDelivery[] = [];
-  const silverSection = extractSilverSection(text);
-  if (!silverSection) return members;
+  const metalSection = extractMetalSection(text, metal);
+  if (!metalSection) return members;
 
   // Parse each firm line (format: "FIRM ORG FIRM_NAME ISSUED STOPPED")
-  const lines = silverSection.split('\n');
+  const lines = metalSection.split('\n');
   for (const line of lines) {
     const match = line.match(/^\d{3}\s+[CH]\s+(.+?)\s+(\d+)?\s*(\d+)?$/);
     if (match) {
@@ -106,9 +115,10 @@ function extractClearingMembers(
   return members.sort((a, b) => b.contracts - a.contracts).slice(0, 5);
 }
 
-/** Extract just the silver section from the full PDF text */
-function extractSilverSection(text: string): string | null {
-  const start = text.indexOf('SILVER FUTURES');
+/** Extract just the metal section from the full PDF text */
+function extractMetalSection(text: string, metal: Metal): string | null {
+  const metalLabel = metal === 'silver' ? 'SILVER FUTURES' : 'GOLD FUTURES';
+  const start = text.indexOf(metalLabel);
   if (start === -1) return null;
 
   // Find the end (next contract or end of report)

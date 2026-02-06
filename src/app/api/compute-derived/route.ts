@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 import {
   computeLeaseRate,
@@ -12,7 +12,9 @@ import {
 import { fetchSofrRate } from '@/lib/api/derived/sofrFetcher';
 import { insertSnapshot, getLatestSnapshot, getSnapshotHistory } from '@/lib/db/queries';
 import { INDICATOR_IDS } from '@/types/indicator';
-import type { IndicatorSnapshotInsert } from '@/types/database';
+import { getMetalConfig, parseMetal } from '@/lib/constants/metals';
+import type { MetalConfig } from '@/lib/constants/metals';
+import type { IndicatorSnapshotInsert, Metal } from '@/types/database';
 import type { CVOLProxyData } from '@/lib/api/derived/types';
 
 export const dynamic = 'force-dynamic';
@@ -25,18 +27,23 @@ interface ComputeResult {
   error?: string;
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const metal = parseMetal(searchParams.get('metal'));
+  const config = getMetalConfig(metal);
+
   const results: ComputeResult[] = [];
 
   // Compute all three derived indicators
-  results.push(await computeAndStoreLeaseRate());
-  results.push(await computeAndStoreFNDRatio());
-  results.push(await computeAndStoreCVOLProxy());
+  results.push(await computeAndStoreLeaseRate(metal, config));
+  results.push(await computeAndStoreFNDRatio(metal, config));
+  results.push(await computeAndStoreCVOLProxy(metal, config));
 
   const successCount = results.filter((r) => r.success).length;
 
   return NextResponse.json({
     success: successCount === results.length,
+    metal: config.displayName,
     message: `Computed ${successCount}/${results.length} derived indicators`,
     results,
     timestamp: new Date().toISOString(),
@@ -44,12 +51,15 @@ export async function GET(): Promise<NextResponse> {
 }
 
 /** Compute and store implied lease rate (#9) */
-async function computeAndStoreLeaseRate(): Promise<ComputeResult> {
+async function computeAndStoreLeaseRate(
+  metal: Metal,
+  config: MetalConfig
+): Promise<ComputeResult> {
   const indicatorId = INDICATOR_IDS.LEASE_RATES;
 
   try {
     // Get backwardation data for lease rate calculation
-    const spotSnapshot = await getLatestSnapshot(INDICATOR_IDS.BACKWARDATION);
+    const spotSnapshot = await getLatestSnapshot(INDICATOR_IDS.BACKWARDATION, metal);
 
     if (!spotSnapshot?.raw_value) {
       return {
@@ -65,7 +75,7 @@ async function computeAndStoreLeaseRate(): Promise<ComputeResult> {
       daysToExpiry?: number;
     };
 
-    const spotPrice = spotData.spotPrice ?? 30;
+    const spotPrice = spotData.spotPrice ?? (metal === 'silver' ? 30 : 2900);
     const futuresPrice = spotData.frontMonthFuturesPrice ?? spotPrice;
     const daysToExpiry = spotData.daysToExpiry ?? 30;
 
@@ -78,6 +88,7 @@ async function computeAndStoreLeaseRate(): Promise<ComputeResult> {
 
     const snapshot: IndicatorSnapshotInsert = {
       indicator_id: indicatorId,
+      metal,
       fetched_at: new Date(),
       data_date: data.reportDate,
       raw_value: { ...data },
@@ -102,14 +113,17 @@ async function computeAndStoreLeaseRate(): Promise<ComputeResult> {
 }
 
 /** Compute and store FND ratio (#11) */
-async function computeAndStoreFNDRatio(): Promise<ComputeResult> {
+async function computeAndStoreFNDRatio(
+  metal: Metal,
+  config: MetalConfig
+): Promise<ComputeResult> {
   const indicatorId = INDICATOR_IDS.FND_RATIO;
 
   try {
     // Get OI and vault data for FND ratio
     const [oiSnapshot, vaultSnapshot] = await Promise.all([
-      getLatestSnapshot(INDICATOR_IDS.OPEN_INTEREST),
-      getLatestSnapshot(INDICATOR_IDS.VAULT_INVENTORY),
+      getLatestSnapshot(INDICATOR_IDS.OPEN_INTEREST, metal),
+      getLatestSnapshot(INDICATOR_IDS.VAULT_INVENTORY, metal),
     ]);
 
     if (!oiSnapshot?.raw_value || !vaultSnapshot?.raw_value) {
@@ -131,11 +145,12 @@ async function computeAndStoreFNDRatio(): Promise<ComputeResult> {
     const registeredOunces = vaultData.totalRegistered ?? 0;
     const frontMonthContract = oiData.byMonth?.[0]?.month ?? 'UNKNOWN';
 
-    const data = computeFNDRatio(frontMonthOI, registeredOunces, frontMonthContract);
+    const data = computeFNDRatio(frontMonthOI, registeredOunces, frontMonthContract, config);
     const score = scoreFNDRatio(data);
 
     const snapshot: IndicatorSnapshotInsert = {
       indicator_id: indicatorId,
+      metal,
       fetched_at: new Date(),
       data_date: data.reportDate,
       raw_value: { ...data },
@@ -160,38 +175,48 @@ async function computeAndStoreFNDRatio(): Promise<ComputeResult> {
 }
 
 /** Compute and store CVOL proxy (#12) */
-async function computeAndStoreCVOLProxy(): Promise<ComputeResult> {
+async function computeAndStoreCVOLProxy(
+  metal: Metal,
+  config: MetalConfig
+): Promise<ComputeResult> {
   const indicatorId = INDICATOR_IDS.CVOL;
 
   try {
     // Fetch daily OHLC from Yahoo Finance
-    const ohlc = await fetchDailyOHLC();
+    const ohlc = await fetchDailyOHLC(config);
 
     if (ohlc.error || ohlc.close === 0) {
       return { indicatorId, success: false, error: ohlc.error ?? 'No OHLC data' };
     }
 
     // Get prior CVOL data for trend comparison
-    const priorSnapshots = await getSnapshotHistory(indicatorId, 30);
+    const priorSnapshots = await getSnapshotHistory(indicatorId, 30, metal);
     const priorRanges = priorSnapshots
       .map((s) => (s.raw_value as unknown as CVOLProxyData)?.rangePercent)
       .filter((r): r is number => typeof r === 'number');
 
     const data = computeCVOLProxy(ohlc.high, ohlc.low, ohlc.close, priorRanges);
-    // Add data source to the data object
-    const dataWithSource = { ...data, dataSource: ohlc.source };
+    // Add data source and GVZ value (for gold) to the data object
+    const dataWithSource = {
+      ...data,
+      dataSource: ohlc.source,
+      gvzValue: ohlc.gvzValue ?? null,
+    };
     const score = scoreCVOLProxy(data);
 
-    const sourceUrl = ohlc.source.includes('SI=F')
-      ? 'https://finance.yahoo.com/quote/SI=F'
-      : 'https://finance.yahoo.com/quote/SLV';
+    // Build appropriate source URL
+    let sourceUrl = `https://finance.yahoo.com/quote/${config.futuresSymbol}`;
+    if (ohlc.gvzValue) {
+      sourceUrl = 'https://fred.stlouisfed.org/series/GVZCLS';
+    }
 
     const snapshot: IndicatorSnapshotInsert = {
       indicator_id: indicatorId,
+      metal,
       fetched_at: new Date(),
       data_date: data.reportDate,
       raw_value: { ...dataWithSource },
-      computed_value: data.rangePercent,
+      computed_value: ohlc.gvzValue ?? data.rangePercent,
       signal: score.signal,
       signal_reason: score.reason,
       source_url: sourceUrl,

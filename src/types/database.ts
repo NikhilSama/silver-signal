@@ -1,3 +1,5 @@
+import type { Metal } from '@/lib/constants/metals';
+
 /** Signal state for traffic light scoring */
 export type SignalType = 'green' | 'yellow' | 'red' | 'error';
 
@@ -10,10 +12,14 @@ export type EventType = 'FND' | 'COT_RELEASE' | 'CONTRACT_EXPIRY' | 'HOLIDAY_WIN
 /** Overall market posture */
 export type PostureType = 'BUY' | 'SELL' | 'CAUTION' | 'NEUTRAL' | 'INSUFFICIENT_DATA';
 
+/** Re-export Metal type for convenience */
+export type { Metal };
+
 /** Core time-series data row from indicator_snapshots */
 export interface IndicatorSnapshot {
   id: number;
   indicator_id: number;
+  metal: Metal;
   fetched_at: Date;
   data_date: Date;
   raw_value: Record<string, unknown>;
@@ -28,6 +34,7 @@ export interface IndicatorSnapshot {
 /** Static reference data for each indicator */
 export interface IndicatorMetadata {
   indicator_id: number;
+  metal: Metal;
   name: string;
   short_description: string;
   full_description: string;
@@ -42,6 +49,7 @@ export interface IndicatorMetadata {
 /** LLM-generated daily briefing */
 export interface DailyBriefing {
   id: number;
+  metal: Metal;
   briefing_date: Date;
   overall_posture: PostureType;
   posture_reason: string;
@@ -53,6 +61,7 @@ export interface DailyBriefing {
 /** Market-critical dates */
 export interface KeyDate {
   id: number;
+  metal: Metal;
   event_date: Date;
   event_name: string;
   event_type: EventType;
@@ -66,6 +75,7 @@ export type IndicatorSnapshotInsert = Omit<IndicatorSnapshot, 'id'>;
 /** Browser Use prompt configuration for an indicator */
 export interface BrowserPrompt {
   indicator_id: number;
+  metal: Metal;
   prompt: string;
   target_url: string;
   enabled: boolean;

@@ -6,6 +6,8 @@ import {
   updateBrowserPromptRunStatus,
   insertSnapshot,
 } from '@/lib/db/queries';
+import { parseMetal } from '@/lib/constants/metals';
+import type { Metal } from '@/lib/constants/metals';
 import type { IndicatorSnapshotInsert } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
@@ -19,12 +21,14 @@ interface UpdatePromptRequest {
   prompt: string;
   targetUrl: string;
   runImmediately?: boolean;
+  metal?: string;
 }
 
 /** GET: Retrieve browser prompt for an indicator */
 export async function GET(request: Request): Promise<NextResponse> {
   const { searchParams } = new URL(request.url);
   const indicatorId = searchParams.get('indicatorId');
+  const metal = parseMetal(searchParams.get('metal'));
 
   if (!indicatorId) {
     return NextResponse.json(
@@ -34,7 +38,7 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const prompt = await getBrowserPrompt(parseInt(indicatorId));
+    const prompt = await getBrowserPrompt(parseInt(indicatorId), metal);
 
     if (!prompt) {
       return NextResponse.json({
@@ -70,7 +74,8 @@ export async function GET(request: Request): Promise<NextResponse> {
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const body = await request.json() as UpdatePromptRequest;
-    const { indicatorId, prompt, targetUrl, runImmediately = true } = body;
+    const { indicatorId, prompt, targetUrl, runImmediately = true, metal: metalParam } = body;
+    const metal = parseMetal(metalParam);
 
     if (!indicatorId || !prompt || !targetUrl) {
       return NextResponse.json(
@@ -90,15 +95,15 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     // Update the prompt in the database
-    const updatedPrompt = await updateBrowserPrompt(indicatorId, prompt, targetUrl);
-    console.log('[BrowserPrompt] Updated prompt for indicator', indicatorId);
+    const updatedPrompt = await updateBrowserPrompt(indicatorId, prompt, targetUrl, metal);
+    console.log('[BrowserPrompt] Updated prompt for indicator', indicatorId, metal);
 
     let runResult = null;
 
     // Run immediately if requested
     if (runImmediately) {
       console.log('[BrowserPrompt] Running browser task immediately...');
-      runResult = await runBrowserTask(indicatorId, prompt, targetUrl);
+      runResult = await runBrowserTask(indicatorId, prompt, targetUrl, metal);
     }
 
     return NextResponse.json({
@@ -127,18 +132,19 @@ export async function POST(request: Request): Promise<NextResponse> {
 async function runBrowserTask(
   indicatorId: number,
   prompt: string,
-  targetUrl: string
+  targetUrl: string,
+  metal: Metal
 ): Promise<{ success: boolean; value?: number; error?: string }> {
   const apiKey = process.env.BROWSER_USE_API_KEY;
   if (!apiKey) {
-    await updateBrowserPromptRunStatus(indicatorId, false, 'BROWSER_USE_API_KEY not configured');
+    await updateBrowserPromptRunStatus(indicatorId, false, 'BROWSER_USE_API_KEY not configured', metal);
     return { success: false, error: 'Browser Use not configured' };
   }
 
   const client = new BrowserUseClient({ apiKey });
 
   try {
-    console.log('[BrowserPrompt] Creating browser task for indicator', indicatorId);
+    console.log('[BrowserPrompt] Creating browser task for indicator', indicatorId, metal);
 
     // Combine URL instruction with the prompt
     const fullPrompt = `Go to ${targetUrl}\n${prompt}`;
@@ -160,7 +166,7 @@ async function runBrowserTask(
     const numericValue = parseFloat(output.replace(/[^0-9.-]/g, ''));
 
     if (isNaN(numericValue)) {
-      await updateBrowserPromptRunStatus(indicatorId, false, `Invalid output: ${output}`);
+      await updateBrowserPromptRunStatus(indicatorId, false, `Invalid output: ${output}`, metal);
       return { success: false, error: `Could not parse value from: ${output}` };
     }
 
@@ -180,17 +186,18 @@ async function runBrowserTask(
       source_url: targetUrl,
       fetch_status: 'success',
       error_detail: null,
+      metal,
     };
 
     await insertSnapshot(snapshot);
-    await updateBrowserPromptRunStatus(indicatorId, true, null);
+    await updateBrowserPromptRunStatus(indicatorId, true, null, metal);
 
     console.log('[BrowserPrompt] Successfully fetched value:', numericValue);
     return { success: true, value: numericValue };
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : 'Browser task failed';
     console.error('[BrowserPrompt] Task error:', errorMsg);
-    await updateBrowserPromptRunStatus(indicatorId, false, errorMsg);
+    await updateBrowserPromptRunStatus(indicatorId, false, errorMsg, metal);
     return { success: false, error: errorMsg };
   }
 }

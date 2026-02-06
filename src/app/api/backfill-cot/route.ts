@@ -1,9 +1,11 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 import { fetchCOTHistory, scoreSpeculatorNet, scoreCommercialShort } from '@/lib/api/cftc';
 import type { ParsedCOTData } from '@/lib/api/cftc';
 import { insertSnapshot, snapshotExists } from '@/lib/db/queries';
 import { INDICATOR_IDS } from '@/types/indicator';
+import { parseMetal, getMetalConfig } from '@/lib/constants/metals';
+import type { Metal } from '@/lib/constants/metals';
 import type { IndicatorSnapshotInsert } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
@@ -12,7 +14,8 @@ export const maxDuration = 300; // 5 minutes for backfill
 /** Process a batch of COT data and insert snapshots */
 async function processCOTBatch(
   data: ParsedCOTData[],
-  sourceUrl: string
+  sourceUrl: string,
+  metal: Metal
 ): Promise<{ inserted: number; skipped: number }> {
   let inserted = 0;
   let skipped = 0;
@@ -26,7 +29,7 @@ async function processCOTBatch(
     const current = sorted[i];
 
     // Check if already exists
-    const exists = await snapshotExists(INDICATOR_IDS.COT_SPECULATOR, current.reportDate);
+    const exists = await snapshotExists(INDICATOR_IDS.COT_SPECULATOR, current.reportDate, metal);
     if (exists) {
       skipped++;
       continue;
@@ -54,6 +57,7 @@ async function processCOTBatch(
       source_url: sourceUrl,
       fetch_status: 'success',
       error_detail: null,
+      metal,
     };
 
     // Insert commercial snapshot
@@ -68,6 +72,7 @@ async function processCOTBatch(
       source_url: sourceUrl,
       fetch_status: 'success',
       error_detail: null,
+      metal,
     };
 
     await insertSnapshot(speculatorSnapshot);
@@ -78,8 +83,13 @@ async function processCOTBatch(
   return { inserted, skipped };
 }
 
-export async function GET(): Promise<NextResponse> {
-  const result = await fetchCOTHistory(3);
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  // Parse metal from query params
+  const { searchParams } = new URL(request.url);
+  const metal = parseMetal(searchParams.get('metal'));
+  const config = getMetalConfig(metal);
+
+  const result = await fetchCOTHistory(config, 3);
 
   if (!result.success || !result.data) {
     return NextResponse.json(
@@ -88,10 +98,11 @@ export async function GET(): Promise<NextResponse> {
     );
   }
 
-  const stats = await processCOTBatch(result.data, result.sourceUrl);
+  const stats = await processCOTBatch(result.data, result.sourceUrl, metal);
 
   return NextResponse.json({
     success: true,
+    metal,
     totalRecords: result.data.length,
     inserted: stats.inserted,
     skipped: stats.skipped,

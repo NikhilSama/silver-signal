@@ -1,32 +1,60 @@
 {
   "crons": [
     {
-      "path": "/api/fetch-cot",
+      "path": "/api/fetch-cot?metal=silver",
       "schedule": "0 21 * * 5"
     },
     {
-      "path": "/api/fetch-cme-daily",
+      "path": "/api/fetch-cot?metal=gold",
+      "schedule": "5 21 * * 5"
+    },
+    {
+      "path": "/api/fetch-cme-daily?metal=silver",
       "schedule": "0 23 * * 1-5"
     },
     {
-      "path": "/api/fetch-margins",
+      "path": "/api/fetch-cme-daily?metal=gold",
+      "schedule": "5 23 * * 1-5"
+    },
+    {
+      "path": "/api/fetch-margins?metal=silver",
       "schedule": "0 18 * * 1-5"
     },
     {
-      "path": "/api/fetch-spot-prices",
+      "path": "/api/fetch-margins?metal=gold",
+      "schedule": "5 18 * * 1-5"
+    },
+    {
+      "path": "/api/fetch-spot-prices?metal=silver",
       "schedule": "0 */4 * * *"
     },
     {
-      "path": "/api/fetch-shanghai",
+      "path": "/api/fetch-spot-prices?metal=gold",
+      "schedule": "2 */4 * * *"
+    },
+    {
+      "path": "/api/fetch-shanghai?metal=silver",
       "schedule": "0 6 * * 1-5"
     },
     {
-      "path": "/api/compute-derived",
+      "path": "/api/fetch-shanghai?metal=gold",
+      "schedule": "5 6 * * 1-5"
+    },
+    {
+      "path": "/api/compute-derived?metal=silver",
       "schedule": "30 23 * * 1-5"
     },
     {
-      "path": "/api/generate-briefing",
+      "path": "/api/compute-derived?metal=gold",
+      "schedule": "35 23 * * 1-5"
+    },
+    {
+      "path": "/api/generate-briefing?metal=silver",
       "schedule": "0 0 * * 1-5"
+    },
+    {
+      "path": "/api/generate-briefing?metal=gold",
+      "schedule": "5 0 * * 1-5"
     }
   ],
   "functions": {

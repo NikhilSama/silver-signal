@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 import {
   fetchVaultStocks,
@@ -12,10 +12,12 @@ import {
 } from '@/lib/api/cme';
 import { insertSnapshot, getLatestSnapshot } from '@/lib/db/queries';
 import { INDICATOR_IDS } from '@/types/indicator';
-import type { IndicatorSnapshotInsert } from '@/types/database';
+import { getMetalConfig, parseMetal } from '@/lib/constants/metals';
+import type { MetalConfig } from '@/lib/constants/metals';
+import type { IndicatorSnapshotInsert, Metal } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
-export const maxDuration = 120; // Increased for Browser Use fallback
+export const maxDuration = 120;
 
 interface FetchResult {
   indicatorId: number;
@@ -24,33 +26,43 @@ interface FetchResult {
   error?: string;
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const metal = parseMetal(searchParams.get('metal'));
+  const config = getMetalConfig(metal);
+
   const results: FetchResult[] = [];
 
   // Fetch all CME data in parallel
   const [vaultResult, oiResult, deliveryResult] = await Promise.all([
-    fetchVaultStocks(),
-    fetchOpenInterest(),
-    fetchDeliveries(),
+    fetchVaultStocks(config),
+    fetchOpenInterest(config),
+    fetchDeliveries(config),
   ]);
 
   // Process Vault Stocks (Indicator #2)
-  results.push(await processVaultStocks(vaultResult));
+  results.push(await processVaultStocks(vaultResult, metal, config));
 
   // Process Open Interest (Indicator #1)
-  results.push(await processOpenInterest(oiResult));
+  results.push(await processOpenInterest(oiResult, metal, config));
 
   // Process Deliveries (Indicator #3)
-  results.push(await processDeliveries(deliveryResult, vaultResult.data?.totalRegistered ?? 0));
+  results.push(await processDeliveries(
+    deliveryResult,
+    vaultResult.data?.totalRegistered ?? 0,
+    metal,
+    config
+  ));
 
-  // Process Roll Patterns (Indicator #8) - requires OI data
-  results.push(await processRollPatterns(oiResult));
+  // Process Roll Patterns (Indicator #8)
+  results.push(await processRollPatterns(oiResult, metal, config));
 
   const successCount = results.filter((r) => r.success).length;
   const failCount = results.filter((r) => !r.success).length;
 
   return NextResponse.json({
     success: failCount === 0,
+    metal: config.displayName,
     message: `Fetched ${successCount} indicators, ${failCount} failed`,
     results,
     timestamp: new Date().toISOString(),
@@ -58,17 +70,18 @@ export async function GET(): Promise<NextResponse> {
 }
 
 async function processVaultStocks(
-  result: Awaited<ReturnType<typeof fetchVaultStocks>>
+  result: Awaited<ReturnType<typeof fetchVaultStocks>>,
+  metal: Metal,
+  config: MetalConfig
 ): Promise<FetchResult> {
   const indicatorId = INDICATOR_IDS.VAULT_INVENTORY;
 
   if (!result.success || !result.data) {
-    await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl);
+    await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl, metal);
     return { indicatorId, success: false, error: result.error };
   }
 
-  // Get prior snapshot for comparison
-  const prior = await getLatestSnapshot(indicatorId);
+  const prior = await getLatestSnapshot(indicatorId, metal);
   const priorData = prior?.raw_value as { totalRegistered?: number } | null;
 
   const score = scoreVaultInventory(result.data, priorData ? {
@@ -78,6 +91,7 @@ async function processVaultStocks(
 
   const snapshot: IndicatorSnapshotInsert = {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: result.data.reportDate,
     raw_value: { ...result.data },
@@ -94,17 +108,18 @@ async function processVaultStocks(
 }
 
 async function processOpenInterest(
-  result: Awaited<ReturnType<typeof fetchOpenInterest>>
+  result: Awaited<ReturnType<typeof fetchOpenInterest>>,
+  metal: Metal,
+  config: MetalConfig
 ): Promise<FetchResult> {
   const indicatorId = INDICATOR_IDS.OPEN_INTEREST;
 
   if (!result.success || !result.data) {
-    await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl);
+    await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl, metal);
     return { indicatorId, success: false, error: result.error };
   }
 
-  // Get prior snapshot for comparison
-  const prior = await getLatestSnapshot(indicatorId);
+  const prior = await getLatestSnapshot(indicatorId, metal);
   const priorData = prior?.raw_value as { totalOI?: number } | null;
 
   const score = scoreOpenInterest(result.data, priorData ? {
@@ -114,6 +129,7 @@ async function processOpenInterest(
 
   const snapshot: IndicatorSnapshotInsert = {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: result.data.reportDate,
     raw_value: { ...result.data },
@@ -131,12 +147,14 @@ async function processOpenInterest(
 
 async function processDeliveries(
   result: Awaited<ReturnType<typeof fetchDeliveries>>,
-  registeredOunces: number
+  registeredOunces: number,
+  metal: Metal,
+  config: MetalConfig
 ): Promise<FetchResult> {
   const indicatorId = INDICATOR_IDS.DELIVERY_ACTIVITY;
 
   if (!result.success || !result.data) {
-    await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl);
+    await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl, metal);
     return { indicatorId, success: false, error: result.error };
   }
 
@@ -144,6 +162,7 @@ async function processDeliveries(
 
   const snapshot: IndicatorSnapshotInsert = {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: result.data.reportDate,
     raw_value: { ...result.data },
@@ -160,17 +179,18 @@ async function processDeliveries(
 }
 
 async function processRollPatterns(
-  oiResult: Awaited<ReturnType<typeof fetchOpenInterest>>
+  oiResult: Awaited<ReturnType<typeof fetchOpenInterest>>,
+  metal: Metal,
+  config: MetalConfig
 ): Promise<FetchResult> {
   const indicatorId = INDICATOR_IDS.ROLL_PATTERNS;
 
   if (!oiResult.success || !oiResult.data) {
-    await insertErrorSnapshot(indicatorId, 'OI data required for roll analysis', oiResult.sourceUrl);
+    await insertErrorSnapshot(indicatorId, 'OI data required for roll analysis', oiResult.sourceUrl, metal);
     return { indicatorId, success: false, error: 'OI data required' };
   }
 
-  // Get prior OI snapshot for roll comparison
-  const prior = await getLatestSnapshot(INDICATOR_IDS.OPEN_INTEREST);
+  const prior = await getLatestSnapshot(INDICATOR_IDS.OPEN_INTEREST, metal);
   const priorOI = prior?.raw_value as { totalOI?: number; byMonth?: unknown[] } | null;
 
   const rollData = analyzeRollPatterns(
@@ -186,6 +206,7 @@ async function processRollPatterns(
 
   const snapshot: IndicatorSnapshotInsert = {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: rollData.reportDate,
     raw_value: { ...rollData },
@@ -204,10 +225,12 @@ async function processRollPatterns(
 async function insertErrorSnapshot(
   indicatorId: number,
   error: string,
-  sourceUrl: string
+  sourceUrl: string,
+  metal: Metal
 ): Promise<void> {
   const snapshot: IndicatorSnapshotInsert = {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: new Date(),
     raw_value: { error },

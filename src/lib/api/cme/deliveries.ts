@@ -1,26 +1,30 @@
 import type { DeliveryData, CMEFetchResult } from './types';
 import { isDeliveryMonth, getFrontMonthCode } from './types';
 import { parseDeliveryPDF } from './pdfParser';
+import type { MetalConfig } from '@/lib/constants/metals';
+import { getMetalConfig, isMetalDeliveryMonth, getNextDeliveryMonth } from '@/lib/constants/metals';
 
 // CME delivery notices PDF (daily report with Issues & Stops)
 const DELIVERY_PDF_URL = 'https://www.cmegroup.com/delivery_reports/MetalsIssuesAndStopsReport.pdf';
 
-/** Fetch delivery (issues & stops) data from CME PDF report */
-export async function fetchDeliveries(): Promise<CMEFetchResult<DeliveryData>> {
+/** Fetch delivery (issues & stops) data from CME PDF report for a metal */
+export async function fetchDeliveries(
+  config: MetalConfig = getMetalConfig()
+): Promise<CMEFetchResult<DeliveryData>> {
   try {
     // Always try to fetch PDF - CME publishes delivery data even outside primary months
-    const pdfResult = await fetchDeliveryPDF();
+    const pdfResult = await fetchDeliveryPDF(config);
     if (pdfResult.success && pdfResult.data) {
-      // Mark whether this is a primary silver delivery month
-      pdfResult.data.isDeliveryMonth = isDeliveryMonth();
+      // Mark whether this is a primary delivery month for this metal
+      pdfResult.data.isDeliveryMonth = isMetalDeliveryMonth(config);
       return pdfResult;
     }
 
     // Fallback: return zero delivery activity
-    console.log('[Deliveries] PDF parse failed, using fallback');
+    console.log(`[Deliveries] PDF parse failed for ${config.displayName}, using fallback`);
     return {
       success: true,
-      data: createFallbackData(),
+      data: createFallbackData(config),
       sourceUrl: 'hardcoded-fallback',
     };
   } catch (error) {
@@ -34,22 +38,25 @@ export async function fetchDeliveries(): Promise<CMEFetchResult<DeliveryData>> {
 }
 
 /** Create fallback data when fetch fails */
-function createFallbackData(): DeliveryData {
+function createFallbackData(config: MetalConfig): DeliveryData {
+  const delivery = getNextDeliveryMonth(config);
   return {
     reportDate: new Date(),
-    contractMonth: getFrontMonthCode(),
+    contractMonth: `${delivery.monthName}${String(delivery.year).slice(-2)}`,
     issues: 0,
     stops: 0,
     cumulativeIssues: 0,
     cumulativeStops: 0,
-    isDeliveryMonth: true,
+    isDeliveryMonth: isMetalDeliveryMonth(config),
     topIssuers: [],
     topStoppers: [],
   };
 }
 
-/** Fetch and parse the daily delivery notices PDF */
-async function fetchDeliveryPDF(): Promise<CMEFetchResult<DeliveryData>> {
+/** Fetch and parse the daily delivery notices PDF for a metal */
+async function fetchDeliveryPDF(
+  config: MetalConfig
+): Promise<CMEFetchResult<DeliveryData>> {
   try {
     const response = await fetch(DELIVERY_PDF_URL, {
       headers: {
@@ -68,7 +75,8 @@ async function fetchDeliveryPDF(): Promise<CMEFetchResult<DeliveryData>> {
     }
 
     const arrayBuffer = await response.arrayBuffer();
-    const data = await parseDeliveryPDF(arrayBuffer);
+    // Pass metal type to parser to filter for correct metal section
+    const data = await parseDeliveryPDF(arrayBuffer, config.id);
 
     return {
       success: true,

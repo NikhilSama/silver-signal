@@ -1,89 +1,121 @@
 import * as cheerio from 'cheerio';
 import type { MarginData, MarginChange, MarginFetchResult } from './types';
 import { fetchMarginsViaBrowser } from '../browseruse';
+import type { MetalConfig } from '@/lib/constants/metals';
+import { getMetalConfig } from '@/lib/constants/metals';
 
-// CME margins page for silver futures
-const MARGINS_URL = 'https://www.cmegroup.com/markets/metals/precious/silver.margins.html';
-const MARGINS_API_URL = 'https://www.cmegroup.com/CmeWS/mvc/Margins/OUTRIGHT/5454/5454';
+// CME margins base URLs
+const MARGINS_BASE = 'https://www.cmegroup.com/markets/metals/precious';
+const MARGINS_API_BASE = 'https://www.cmegroup.com/CmeWS/mvc/Margins/OUTRIGHT';
 
-/** Fetch current margin requirements for silver futures */
-export async function fetchMargins(): Promise<MarginFetchResult> {
+/** Get margins page URL for a metal */
+function getMarginsUrl(config: MetalConfig): string {
+  const metal = config.id === 'silver' ? 'silver' : 'gold';
+  return `${MARGINS_BASE}/${metal}.margins.html`;
+}
+
+/** Get margins API URL for a metal */
+function getMarginsApiUrl(config: MetalConfig): string {
+  return `${MARGINS_API_BASE}/${config.marginsProductCode}/${config.marginsProductCode}`;
+}
+
+/** Fetch current margin requirements for a metal */
+export async function fetchMargins(
+  config: MetalConfig = getMetalConfig()
+): Promise<MarginFetchResult> {
+  const marginsUrl = getMarginsUrl(config);
+  const marginsApiUrl = getMarginsApiUrl(config);
   try {
     // Try the API endpoint first
-    console.log('[Margins] Trying CME API...');
-    const apiResult = await fetchMarginsAPI();
+    console.log(`[Margins] Trying CME API for ${config.displayName}...`);
+    const apiResult = await fetchMarginsAPI(marginsApiUrl);
     if (apiResult.success && apiResult.data && apiResult.data.initialMarginPercent > 0) {
-      console.log('[Margins] CME API success:', apiResult.data.initialMarginPercent);
+      console.log(`[Margins] CME API success for ${config.displayName}:`, apiResult.data.initialMarginPercent);
       return apiResult;
     }
-    console.log('[Margins] CME API failed:', apiResult.error);
+    console.log(`[Margins] CME API failed for ${config.displayName}:`, apiResult.error);
 
     // Fallback to scraping the margins page
-    console.log('[Margins] Trying page scrape...');
-    const pageResult = await fetchMarginsPage();
+    console.log(`[Margins] Trying page scrape for ${config.displayName}...`);
+    const pageResult = await fetchMarginsPage(marginsUrl);
     if (pageResult.success && pageResult.data && pageResult.data.initialMarginPercent > 0) {
-      console.log('[Margins] Page scrape success:', pageResult.data.initialMarginPercent);
+      console.log(`[Margins] Page scrape success for ${config.displayName}:`, pageResult.data.initialMarginPercent);
       return pageResult;
     }
-    console.log('[Margins] Page scrape failed or zero');
+    console.log(`[Margins] Page scrape failed or zero for ${config.displayName}`);
 
-    // Try Browser Use Cloud (real browser automation)
-    console.log('[Margins] Trying Browser Use Cloud...');
-    const browserResult = await fetchMarginsViaBrowser();
-    console.log('[Margins] Browser Use result:', browserResult);
-    if (browserResult.success && browserResult.data && browserResult.data > 0) {
-      const marginPercent = browserResult.data;
-      const contractValue = 150000;
-      console.log('[Margins] Browser Use success:', marginPercent);
-      return {
-        success: true,
-        data: {
-          reportDate: new Date(),
-          initialMarginPercent: marginPercent,
-          maintenanceMarginPercent: marginPercent * 0.9,
-          initialMarginDollars: (marginPercent / 100) * contractValue,
-          contractValue,
-          lastChangeDate: null,
-          changePercent: null,
-          recentChanges: [],
-        },
-        sourceUrl: browserResult.sourceUrl || MARGINS_URL,
-      };
+    // Try Browser Use Cloud (real browser automation) - only for silver for now
+    if (config.id === 'silver') {
+      console.log('[Margins] Trying Browser Use Cloud...');
+      const browserResult = await fetchMarginsViaBrowser();
+      console.log('[Margins] Browser Use result:', browserResult);
+      if (browserResult.success && browserResult.data && browserResult.data > 0) {
+        const marginPercent = browserResult.data;
+        const contractValue = 150000;
+        console.log('[Margins] Browser Use success:', marginPercent);
+        return {
+          success: true,
+          data: {
+            reportDate: new Date(),
+            initialMarginPercent: marginPercent,
+            maintenanceMarginPercent: marginPercent * 0.9,
+            initialMarginDollars: (marginPercent / 100) * contractValue,
+            contractValue,
+            lastChangeDate: null,
+            changePercent: null,
+            recentChanges: [],
+          },
+          sourceUrl: browserResult.sourceUrl || marginsUrl,
+        };
+      }
     }
 
-    // Last resort: use known margin values (CME raised to 15% in Jan 2026 per PRD)
-    console.log('[Margins] Using hardcoded fallback');
+    // Last resort: use known margin values
+    console.log(`[Margins] Using hardcoded fallback for ${config.displayName}`);
+    const fallbackData = getFallbackMarginData(config);
     return {
       success: true,
-      data: {
-        reportDate: new Date(),
-        initialMarginPercent: 15,
-        maintenanceMarginPercent: 13.6,
-        initialMarginDollars: 22500,
-        contractValue: 150000,
-        lastChangeDate: new Date('2026-01-15'),
-        changePercent: 36,
-        recentChanges: [],
-      },
+      data: fallbackData,
       sourceUrl: 'hardcoded-fallback',
     };
   } catch (error) {
-    console.error('[Margins] Error:', error);
+    console.error(`[Margins] Error for ${config.displayName}:`, error);
     return {
       success: false,
       data: null,
       error: error instanceof Error ? error.message : 'Unknown fetch error',
-      sourceUrl: MARGINS_URL,
+      sourceUrl: marginsUrl,
     };
   }
 }
 
+/** Get fallback margin data for a metal */
+function getFallbackMarginData(config: MetalConfig): MarginData {
+  // Default margin percentages (approximate)
+  const margins: Record<string, { percent: number; dollars: number; contractValue: number }> = {
+    silver: { percent: 15, dollars: 22500, contractValue: 150000 },
+    gold: { percent: 8, dollars: 23200, contractValue: 290000 },
+  };
+  const m = margins[config.id] ?? margins.silver;
+
+  return {
+    reportDate: new Date(),
+    initialMarginPercent: m.percent,
+    maintenanceMarginPercent: m.percent * 0.9,
+    initialMarginDollars: m.dollars,
+    contractValue: m.contractValue,
+    lastChangeDate: null,
+    changePercent: null,
+    recentChanges: [],
+  };
+}
+
 /** Fetch margins from CME API */
-async function fetchMarginsAPI(): Promise<MarginFetchResult> {
+async function fetchMarginsAPI(apiUrl: string): Promise<MarginFetchResult> {
   try {
-    const response = await fetch(MARGINS_API_URL, {
+    const response = await fetch(apiUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
+        'User-Agent': 'Mozilla/5.0 (compatible; MetalMonitor/1.0)',
         'Accept': 'application/json',
       },
       next: { revalidate: 0 },
@@ -94,7 +126,7 @@ async function fetchMarginsAPI(): Promise<MarginFetchResult> {
         success: false,
         data: null,
         error: `HTTP ${response.status}`,
-        sourceUrl: MARGINS_API_URL,
+        sourceUrl: apiUrl,
       };
     }
 
@@ -106,7 +138,7 @@ async function fetchMarginsAPI(): Promise<MarginFetchResult> {
         success: false,
         data: null,
         error: 'CME API blocked',
-        sourceUrl: MARGINS_API_URL,
+        sourceUrl: apiUrl,
       };
     }
 
@@ -115,14 +147,14 @@ async function fetchMarginsAPI(): Promise<MarginFetchResult> {
     return {
       success: true,
       data,
-      sourceUrl: MARGINS_API_URL,
+      sourceUrl: apiUrl,
     };
   } catch (error) {
     return {
       success: false,
       data: null,
       error: error instanceof Error ? error.message : 'API parse error',
-      sourceUrl: MARGINS_API_URL,
+      sourceUrl: apiUrl,
     };
   }
 }
@@ -157,10 +189,10 @@ function parseMarginsAPIResponse(json: unknown): MarginData {
 }
 
 /** Fallback: scrape the margins HTML page */
-async function fetchMarginsPage(): Promise<MarginFetchResult> {
-  const response = await fetch(MARGINS_URL, {
+async function fetchMarginsPage(pageUrl: string): Promise<MarginFetchResult> {
+  const response = await fetch(pageUrl, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
+      'User-Agent': 'Mozilla/5.0 (compatible; MetalMonitor/1.0)',
     },
     next: { revalidate: 0 },
   });
@@ -170,7 +202,7 @@ async function fetchMarginsPage(): Promise<MarginFetchResult> {
       success: false,
       data: null,
       error: `HTTP ${response.status}`,
-      sourceUrl: MARGINS_URL,
+      sourceUrl: pageUrl,
     };
   }
 
@@ -180,7 +212,7 @@ async function fetchMarginsPage(): Promise<MarginFetchResult> {
   return {
     success: true,
     data,
-    sourceUrl: MARGINS_URL,
+    sourceUrl: pageUrl,
   };
 }
 

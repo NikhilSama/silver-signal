@@ -1,12 +1,22 @@
 import * as XLSX from 'xlsx';
 import type { VaultStocksData, DepositoryRow, CMEFetchResult } from './types';
+import type { MetalConfig } from '@/lib/constants/metals';
+import { getMetalConfig } from '@/lib/constants/metals';
 
-const VAULT_STOCKS_URL = 'https://www.cmegroup.com/delivery_reports/Silver_stocks.xls';
+const CME_VAULT_BASE = 'https://www.cmegroup.com/delivery_reports';
 
-/** Fetch and parse CME Silver vault stocks XLS file */
-export async function fetchVaultStocks(): Promise<CMEFetchResult<VaultStocksData>> {
+/** Get vault stocks URL for a metal */
+function getVaultStocksUrl(config: MetalConfig): string {
+  return `${CME_VAULT_BASE}/${config.vaultStocksFile}`;
+}
+
+/** Fetch and parse CME vault stocks XLS file for a metal */
+export async function fetchVaultStocks(
+  config: MetalConfig = getMetalConfig()
+): Promise<CMEFetchResult<VaultStocksData>> {
+  const url = getVaultStocksUrl(config);
   try {
-    const response = await fetch(VAULT_STOCKS_URL, {
+    const response = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
       },
@@ -18,7 +28,7 @@ export async function fetchVaultStocks(): Promise<CMEFetchResult<VaultStocksData
         success: false,
         data: null,
         error: `HTTP ${response.status}: ${response.statusText}`,
-        sourceUrl: VAULT_STOCKS_URL,
+        sourceUrl: url,
       };
     }
 
@@ -28,14 +38,14 @@ export async function fetchVaultStocks(): Promise<CMEFetchResult<VaultStocksData
     return {
       success: true,
       data,
-      sourceUrl: VAULT_STOCKS_URL,
+      sourceUrl: url,
     };
   } catch (error) {
     return {
       success: false,
       data: null,
       error: error instanceof Error ? error.message : 'Unknown fetch error',
-      sourceUrl: VAULT_STOCKS_URL,
+      sourceUrl: url,
     };
   }
 }

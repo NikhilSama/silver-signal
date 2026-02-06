@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { insertSnapshot, getLatestSnapshot } from '@/lib/db/queries';
+import { parseMetal } from '@/lib/constants/metals';
 import type { IndicatorSnapshotInsert } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
@@ -8,12 +9,14 @@ interface ManualEditRequest {
   indicatorId: number;
   newValue: number;
   reason?: string;
+  metal?: string;
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
   try {
     const body = await request.json() as ManualEditRequest;
-    const { indicatorId, newValue, reason } = body;
+    const { indicatorId, newValue, reason, metal: metalParam } = body;
+    const metal = parseMetal(metalParam);
 
     if (!indicatorId || typeof newValue !== 'number') {
       return NextResponse.json(
@@ -23,7 +26,7 @@ export async function POST(request: Request): Promise<NextResponse> {
     }
 
     // Get the latest snapshot to preserve other fields
-    const latest = await getLatestSnapshot(indicatorId);
+    const latest = await getLatestSnapshot(indicatorId, metal);
 
     // Create a new snapshot with the manual edit
     const snapshot: IndicatorSnapshotInsert = {
@@ -42,6 +45,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       source_url: 'manual-edit',
       fetch_status: 'success',
       error_detail: null,
+      metal,
     };
 
     const inserted = await insertSnapshot(snapshot);

@@ -1,6 +1,6 @@
 import type { LeaseRateData, FNDRatioData, CVOLProxyData } from './types';
-
-const OUNCES_PER_CONTRACT = 5000;
+import type { MetalConfig } from '@/lib/constants/metals';
+import { getMetalConfig, getNextDeliveryMonth } from '@/lib/constants/metals';
 
 /**
  * Compute implied lease rate from SOFR minus forward rate (#9)
@@ -44,19 +44,20 @@ export function computeLeaseRate(
 /**
  * Compute FND proximity and delivery pressure ratio (#11)
  *
- * Ratio = (delivery_month_OI * 5000) / registered_ounces
+ * Ratio = (delivery_month_OI * contractSize) / registered_ounces
  * Shows theoretical delivery claims vs available metal
  */
 export function computeFNDRatio(
   deliveryMonthOI: number,
   registeredOunces: number,
-  frontMonthContract: string
+  frontMonthContract: string,
+  config: MetalConfig = getMetalConfig()
 ): FNDRatioData {
-  const daysToFND = getDaysToNextFND();
-  const nextFNDDate = getNextFNDDate();
+  const daysToFND = getDaysToNextFND(config);
+  const nextFNDDate = getNextFNDDate(config);
 
-  // Compute delivery pressure ratio
-  const oiInOunces = deliveryMonthOI * OUNCES_PER_CONTRACT;
+  // Compute delivery pressure ratio using config's contract size
+  const oiInOunces = deliveryMonthOI * config.contractSize;
   const safeRegistered = Math.max(registeredOunces, 1);
   const deliveryPressureRatio = oiInOunces / safeRegistered;
 
@@ -105,39 +106,28 @@ export function computeCVOLProxy(
   };
 }
 
-/** Get days to next First Notice Day */
-function getDaysToNextFND(): number {
+/** Get days to next First Notice Day for a metal */
+function getDaysToNextFND(config: MetalConfig): number {
   const now = new Date();
-  const nextFND = getNextFNDDate();
-  return Math.ceil((nextFND.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  const nextFND = getNextFNDDate(config);
+  return Math.max(0, Math.ceil((nextFND.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
 }
 
-/** Get the next FND date */
-function getNextFNDDate(): Date {
-  const now = new Date();
-  const year = now.getFullYear();
+/** Get the next FND date for a metal */
+function getNextFNDDate(config: MetalConfig): Date {
+  const delivery = getNextDeliveryMonth(config);
 
-  // Silver FND dates for delivery months (approximate - last business day before)
-  // March FND: ~Feb 28
-  // May FND: ~Apr 30
-  // July FND: ~Jun 30
-  // September FND: ~Aug 29
-  // December FND: ~Nov 28
-  const fndDates = [
-    new Date(year, 1, 28),  // Mar FND
-    new Date(year, 3, 30),  // May FND
-    new Date(year, 5, 30),  // Jul FND
-    new Date(year, 7, 29),  // Sep FND
-    new Date(year, 10, 28), // Dec FND
-  ];
+  // FND is last business day of the month before the delivery month
+  const fndMonth = delivery.month === 0 ? 11 : delivery.month - 1;
+  const fndYear = delivery.month === 0 ? delivery.year - 1 : delivery.year;
 
-  // Find next FND
-  for (const fnd of fndDates) {
-    if (fnd > now) {
-      return fnd;
-    }
-  }
+  // Get last day of the month before delivery
+  const fnd = new Date(fndYear, fndMonth + 1, 0);
 
-  // If past all this year's FNDs, return next year's March FND
-  return new Date(year + 1, 1, 28);
+  // Adjust for weekends (move to Friday)
+  const day = fnd.getDay();
+  if (day === 0) fnd.setDate(fnd.getDate() - 2); // Sunday -> Friday
+  if (day === 6) fnd.setDate(fnd.getDate() - 1); // Saturday -> Friday
+
+  return fnd;
 }

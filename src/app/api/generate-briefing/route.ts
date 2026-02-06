@@ -1,4 +1,4 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import Anthropic from '@anthropic-ai/sdk';
 
 import {
@@ -10,6 +10,9 @@ import {
   getAllMetadata,
 } from '@/lib/db/queries';
 import { INDICATOR_METADATA } from '@/lib/constants/indicators';
+import { GOLD_INDICATOR_METADATA } from '@/lib/constants/indicators-gold';
+import { parseMetal, getMetalConfig } from '@/lib/constants/metals';
+import type { Metal } from '@/lib/constants/metals';
 import type { IndicatorSnapshot, IndicatorMetadata, KeyDate, DailyBriefing } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
@@ -32,7 +35,7 @@ interface BriefingResponse {
   briefing_text: string;
 }
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: NextRequest): Promise<NextResponse> {
   const apiKey = process.env.ANTHROPIC_API_KEY;
 
   if (!apiKey) {
@@ -42,23 +45,28 @@ export async function GET(): Promise<NextResponse> {
     );
   }
 
+  // Parse metal from query params
+  const { searchParams } = new URL(request.url);
+  const metal = parseMetal(searchParams.get('metal'));
+  const config = getMetalConfig(metal);
+
   try {
     // Gather all data for the briefing
     const [snapshots, metadata, upcomingDates, yesterdayBriefing] = await Promise.all([
-      getLatestSnapshots(),
-      getAllMetadata(),
-      getUpcomingDates(14),
-      getYesterdayBriefing(),
+      getLatestSnapshots(metal),
+      getAllMetadata(metal),
+      getUpcomingDates(14, metal),
+      getYesterdayBriefing(metal),
     ]);
 
     // Get 30-day history for each indicator
     const historyPromises = Array.from({ length: 12 }, (_, i) =>
-      getSnapshotHistory(i + 1, 30)
+      getSnapshotHistory(i + 1, 30, metal)
     );
     const histories = await Promise.all(historyPromises);
 
     // Build indicator context for the LLM
-    const indicatorContexts = buildIndicatorContexts(snapshots, histories, metadata);
+    const indicatorContexts = buildIndicatorContexts(snapshots, histories, metadata, metal);
 
     // Calculate overall posture based on current signals
     const posture = calculatePosture(snapshots);
@@ -69,7 +77,8 @@ export async function GET(): Promise<NextResponse> {
       indicatorContexts,
       posture,
       upcomingDates,
-      yesterdayBriefing
+      yesterdayBriefing,
+      config.displayName
     );
 
     // Store the briefing
@@ -79,10 +88,12 @@ export async function GET(): Promise<NextResponse> {
       posture_reason: briefingResponse.posture_reason,
       briefing_text: briefingResponse.briefing_text,
       indicator_summary: buildIndicatorSummary(snapshots),
+      metal,
     });
 
     return NextResponse.json({
       success: true,
+      metal,
       briefing: {
         date: storedBriefing.briefing_date,
         posture: storedBriefing.overall_posture,
@@ -105,13 +116,15 @@ export async function GET(): Promise<NextResponse> {
 function buildIndicatorContexts(
   snapshots: IndicatorSnapshot[],
   histories: IndicatorSnapshot[][],
-  metadata: IndicatorMetadata[]
+  metadata: IndicatorMetadata[],
+  metal: Metal
 ): IndicatorContext[] {
+  const fallbackMetadata = metal === 'gold' ? GOLD_INDICATOR_METADATA : INDICATOR_METADATA;
   return Array.from({ length: 12 }, (_, i) => {
     const id = i + 1;
     const snapshot = snapshots.find((s) => s.indicator_id === id);
     const history = histories[i] || [];
-    const meta = metadata.find((m) => m.indicator_id === id) || INDICATOR_METADATA[i];
+    const meta = metadata.find((m) => m.indicator_id === id) || fallbackMetadata[i];
 
     const historyValues = history.map((h) => Number(h.computed_value));
 
@@ -182,11 +195,12 @@ async function generateBriefingWithClaude(
   indicators: IndicatorContext[],
   posture: string,
   upcomingDates: KeyDate[],
-  yesterdayBriefing: DailyBriefing | null
+  yesterdayBriefing: DailyBriefing | null,
+  metalName: string
 ): Promise<BriefingResponse> {
   const client = new Anthropic({ apiKey });
 
-  const systemPrompt = `You are a senior precious metals analyst specializing in COMEX silver futures markets. Your role is to provide clear, actionable daily briefings based on market data.
+  const systemPrompt = `You are a senior precious metals analyst specializing in COMEX ${metalName.toLowerCase()} futures markets. Your role is to provide clear, actionable daily briefings based on market data.
 
 Be direct and specific. Include actual numbers from the data. State what the data shows, not what it might show. End with a clear actionable takeaway framed as "the data suggests" (not financial advice).
 
@@ -197,7 +211,7 @@ Respond ONLY with valid JSON in this exact format:
   "briefing_text": "3-5 paragraphs covering: overall assessment, the 2-3 most important indicator changes, upcoming key dates, and specific actionable takeaway"
 }`;
 
-  const userPrompt = buildUserPrompt(indicators, posture, upcomingDates, yesterdayBriefing);
+  const userPrompt = buildUserPrompt(indicators, posture, upcomingDates, yesterdayBriefing, metalName);
 
   const response = await client.messages.create({
     model: 'claude-sonnet-4-20250514',
@@ -249,7 +263,8 @@ function buildUserPrompt(
   indicators: IndicatorContext[],
   posture: string,
   upcomingDates: KeyDate[],
-  yesterdayBriefing: DailyBriefing | null
+  yesterdayBriefing: DailyBriefing | null,
+  metalName: string
 ): string {
   const indicatorData = indicators.map((ind) => {
     const historyStr = ind.history.length > 0
@@ -280,7 +295,7 @@ function buildUserPrompt(
     ? `\n**Yesterday's Briefing (${new Date(yesterdayBriefing.briefing_date).toLocaleDateString()}):**\nPosture: ${yesterdayBriefing.overall_posture}\n${yesterdayBriefing.briefing_text.substring(0, 500)}...`
     : '\nNo prior briefing available.';
 
-  return `Generate a daily briefing for the COMEX Silver Early Signal Monitoring System.
+  return `Generate a daily briefing for the COMEX ${metalName} Early Signal Monitoring System.
 
 **Today's Date:** ${new Date().toLocaleDateString()}
 

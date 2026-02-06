@@ -1,22 +1,25 @@
 import type { ShanghaiPremiumData, ShanghaiFetchResult } from './types';
+import type { MetalConfig } from '@/lib/constants/metals';
+import { getMetalConfig } from '@/lib/constants/metals';
 
 // goldprice.org APIs for CNY and USD prices
 const GOLDPRICE_CNY_URL = 'https://data-asg.goldprice.org/dbXRates/CNY';
 const GOLDPRICE_USD_URL = 'https://data-asg.goldprice.org/dbXRates/USD';
 
-/** Fetch Shanghai premium vs COMEX spot */
+/** Fetch Shanghai premium vs COMEX spot for a metal */
 export async function fetchShanghaiPremium(
-  comexSpot: number
+  comexSpot: number,
+  config: MetalConfig = getMetalConfig()
 ): Promise<ShanghaiFetchResult> {
   try {
-    // Fetch CNY silver price from goldprice.org API
-    const result = await fetchGoldPriceAPI();
+    // Fetch CNY price from goldprice.org API
+    const result = await fetchGoldPriceAPI(config);
 
     if (!result.success || result.priceCNY === 0) {
       return {
         success: false,
         data: null,
-        error: result.error ?? 'Failed to fetch SGE price',
+        error: result.error ?? `Failed to fetch SGE ${config.displayName} price`,
         sourceUrl: GOLDPRICE_CNY_URL,
       };
     }
@@ -51,8 +54,8 @@ export async function fetchShanghaiPremium(
   }
 }
 
-/** Fetch silver prices from goldprice.org and derive CNY/USD rate from gold */
-async function fetchGoldPriceAPI(): Promise<{
+/** Fetch metal prices from goldprice.org and derive CNY/USD rate from gold */
+async function fetchGoldPriceAPI(config: MetalConfig): Promise<{
   success: boolean;
   priceCNY: number;
   cnyUsdRate?: number;
@@ -63,14 +66,14 @@ async function fetchGoldPriceAPI(): Promise<{
     const [cnyResponse, usdResponse] = await Promise.all([
       fetch(GOLDPRICE_CNY_URL, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
+          'User-Agent': 'Mozilla/5.0 (compatible; MetalMonitor/1.0)',
           'Accept': 'application/json',
         },
         next: { revalidate: 0 },
       }),
       fetch(GOLDPRICE_USD_URL, {
         headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
+          'User-Agent': 'Mozilla/5.0 (compatible; MetalMonitor/1.0)',
           'Accept': 'application/json',
         },
         next: { revalidate: 0 },
@@ -83,12 +86,13 @@ async function fetchGoldPriceAPI(): Promise<{
 
     const cnyData = await cnyResponse.json();
     const cnyItem = cnyData.items?.[0];
-    if (!cnyItem || typeof cnyItem.xagPrice !== 'number') {
+    const priceField = config.spotPriceField;
+    if (!cnyItem || typeof cnyItem[priceField] !== 'number') {
       return { success: false, priceCNY: 0, error: 'Invalid CNY API response' };
     }
 
-    // xagPrice is silver price per oz in CNY
-    const priceCNY = cnyItem.xagPrice;
+    // Get price in CNY using the config's spot price field
+    const priceCNY = cnyItem[priceField];
 
     // Derive CNY/USD rate from gold prices (more stable than using silver)
     let cnyUsdRate = 7.2; // Fallback

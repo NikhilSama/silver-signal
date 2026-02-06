@@ -1,11 +1,19 @@
 import type { OpenInterestData, CMEFetchResult } from './types';
+import type { MetalConfig } from '@/lib/constants/metals';
+import { getMetalConfig } from '@/lib/constants/metals';
 
 // CFTC COT API (primary - FREE, no API key, reliable weekly data)
 const CFTC_API_URL = 'https://publicreporting.cftc.gov/resource/6dca-aqww.json';
-// CME settlements API (secondary fallback - often blocked)
-const SETTLEMENT_URL = 'https://www.cmegroup.com/CmeWS/mvc/Settlements/Futures/Settlements/5454/FUT';
+// CME settlements API base URL
+const CME_SETTLEMENTS_BASE = 'https://www.cmegroup.com/CmeWS/mvc/Settlements/Futures/Settlements';
 
 const FETCH_TIMEOUT_MS = 15000;
+
+/** Get CME settlements URL for a metal */
+function getSettlementUrl(config: MetalConfig): string {
+  // Product codes: Silver=5454, Gold=437
+  return `${CME_SETTLEMENTS_BASE}/${config.marginsProductCode}/FUT`;
+}
 
 /**
  * Fetch Open Interest data - CFTC Socrata API primary, CME as fallback
@@ -13,20 +21,22 @@ const FETCH_TIMEOUT_MS = 15000;
  * Per Excel spec: CFTC Socrata is FREE and reliable (weekly data)
  * Databento would cost $179/mo and CME direct APIs are typically blocked
  */
-export async function fetchOpenInterest(): Promise<CMEFetchResult<OpenInterestData>> {
+export async function fetchOpenInterest(
+  config: MetalConfig = getMetalConfig()
+): Promise<CMEFetchResult<OpenInterestData>> {
   try {
     // Primary: CFTC Socrata API (FREE, no auth, reliable)
-    const cftcResult = await fetchFromCFTCSocrata();
+    const cftcResult = await fetchFromCFTCSocrata(config);
     if (cftcResult.success && cftcResult.data && cftcResult.data.totalOI > 0) {
-      console.log('[OpenInterest] Using CFTC Socrata data');
+      console.log(`[OpenInterest] Using CFTC Socrata data for ${config.displayName}`);
       return cftcResult;
     }
-    console.log('[OpenInterest] CFTC failed, trying CME API...');
+    console.log(`[OpenInterest] CFTC failed for ${config.displayName}, trying CME API...`);
 
     // Secondary: CME settlements API (often blocked)
-    const cmeResult = await fetchFromCMESettlements();
+    const cmeResult = await fetchFromCMESettlements(config);
     if (cmeResult.success && cmeResult.data && cmeResult.data.totalOI > 0) {
-      console.log('[OpenInterest] Using CME settlements data');
+      console.log(`[OpenInterest] Using CME settlements data for ${config.displayName}`);
       return cmeResult;
     }
 
@@ -43,9 +53,12 @@ export async function fetchOpenInterest(): Promise<CMEFetchResult<OpenInterestDa
 }
 
 /** Fetch OI from CFTC Socrata API (weekly COT data) */
-async function fetchFromCFTCSocrata(): Promise<CMEFetchResult<OpenInterestData>> {
-  // Filter for COMEX Silver futures only (contract code 084691)
-  const whereClause = "commodity_name='SILVER' AND cftc_contract_market_code='084691'";
+async function fetchFromCFTCSocrata(
+  config: MetalConfig
+): Promise<CMEFetchResult<OpenInterestData>> {
+  // Filter for COMEX metal using config's cftcCode
+  const commodityName = config.id === 'silver' ? 'SILVER' : 'GOLD';
+  const whereClause = `commodity_name='${commodityName}' AND cftc_contract_market_code='${config.cftcCode}'`;
   const url = `${CFTC_API_URL}?$where=${encodeURIComponent(whereClause)}&$order=report_date_as_yyyy_mm_dd DESC&$limit=1`;
 
   try {
@@ -111,12 +124,15 @@ interface CFTCRow {
 }
 
 /** Fetch OI from CME settlements API (secondary fallback) */
-async function fetchFromCMESettlements(): Promise<CMEFetchResult<OpenInterestData>> {
+async function fetchFromCMESettlements(
+  config: MetalConfig
+): Promise<CMEFetchResult<OpenInterestData>> {
+  const settlementUrl = getSettlementUrl(config);
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
-    const response = await fetch(SETTLEMENT_URL, {
+    const response = await fetch(settlementUrl, {
       signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
@@ -131,7 +147,7 @@ async function fetchFromCMESettlements(): Promise<CMEFetchResult<OpenInterestDat
         success: false,
         data: null,
         error: `CME HTTP ${response.status}`,
-        sourceUrl: SETTLEMENT_URL,
+        sourceUrl: settlementUrl,
       };
     }
 
@@ -143,7 +159,7 @@ async function fetchFromCMESettlements(): Promise<CMEFetchResult<OpenInterestDat
         success: false,
         data: null,
         error: 'CME API blocked',
-        sourceUrl: SETTLEMENT_URL,
+        sourceUrl: settlementUrl,
       };
     }
 
@@ -151,7 +167,7 @@ async function fetchFromCMESettlements(): Promise<CMEFetchResult<OpenInterestDat
     return {
       success: true,
       data,
-      sourceUrl: SETTLEMENT_URL,
+      sourceUrl: settlementUrl,
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : 'CME API error';
@@ -159,7 +175,7 @@ async function fetchFromCMESettlements(): Promise<CMEFetchResult<OpenInterestDat
       success: false,
       data: null,
       error: message.includes('abort') ? 'Request timeout' : message,
-      sourceUrl: SETTLEMENT_URL,
+      sourceUrl: settlementUrl,
     };
   }
 }

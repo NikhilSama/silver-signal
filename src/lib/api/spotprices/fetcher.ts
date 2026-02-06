@@ -1,4 +1,6 @@
 import type { SpotPriceData, SpotPriceFetchResult } from './types';
+import type { MetalConfig } from '@/lib/constants/metals';
+import { getMetalConfig, getNextDeliveryMonth } from '@/lib/constants/metals';
 
 // Primary API - goldprice.org (reliable, no key required)
 const GOLDPRICE_API_URL = 'https://data-asg.goldprice.org/dbXRates/USD';
@@ -6,11 +8,13 @@ const GOLDPRICE_API_URL = 'https://data-asg.goldprice.org/dbXRates/USD';
 // Yahoo Finance API for futures prices (CME API is blocked)
 const YAHOO_FINANCE_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart';
 
-/** Fetch spot price and calculate backwardation */
-export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
+/** Fetch spot price and calculate backwardation for a metal */
+export async function fetchSpotPrices(
+  config: MetalConfig = getMetalConfig()
+): Promise<SpotPriceFetchResult> {
   try {
     // Fetch spot price from goldprice.org API
-    const spotResult = await fetchSpotPrice();
+    const spotResult = await fetchSpotPrice(config);
     if (!spotResult.success || spotResult.price === 0) {
       return {
         success: false,
@@ -21,7 +25,7 @@ export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
     }
 
     // Fetch front-month futures price from Yahoo Finance
-    const futuresResult = await fetchFuturesPrice();
+    const futuresResult = await fetchFuturesPrice(config);
     if (!futuresResult.success) {
       // Use spot as fallback - assume flat
       return {
@@ -30,11 +34,11 @@ export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
           reportDate: new Date(),
           spotPrice: spotResult.price,
           frontMonthFuturesPrice: spotResult.price,
-          frontMonthContract: getFrontMonthContract(),
+          frontMonthContract: getFrontMonthContract(config),
           spread: 0,
           spreadPercent: 0,
           isBackwardation: false,
-          daysToExpiry: getDaysToExpiry(),
+          daysToExpiry: getDaysToExpiry(config),
         },
         sourceUrl: GOLDPRICE_API_URL,
       };
@@ -53,7 +57,7 @@ export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
         spread,
         spreadPercent,
         isBackwardation: spread > 0,
-        daysToExpiry: getDaysToExpiry(),
+        daysToExpiry: getDaysToExpiry(config),
       },
       sourceUrl: futuresResult.sourceUrl,
     };
@@ -67,12 +71,14 @@ export async function fetchSpotPrices(): Promise<SpotPriceFetchResult> {
   }
 }
 
-/** Fetch silver spot price from goldprice.org API */
-async function fetchSpotPrice(): Promise<{ success: boolean; price: number; error?: string }> {
+/** Fetch spot price from goldprice.org API for a metal */
+async function fetchSpotPrice(
+  config: MetalConfig
+): Promise<{ success: boolean; price: number; error?: string }> {
   try {
     const response = await fetch(GOLDPRICE_API_URL, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; SilverMonitor/1.0)',
+        'User-Agent': 'Mozilla/5.0 (compatible; MetalMonitor/1.0)',
         'Accept': 'application/json',
       },
       next: { revalidate: 0 },
@@ -84,14 +90,14 @@ async function fetchSpotPrice(): Promise<{ success: boolean; price: number; erro
 
     const data = await response.json();
 
-    // API returns: { items: [{ curr: "USD", xagPrice: 90.147, ... }] }
+    // API returns: { items: [{ curr: "USD", xagPrice: 30.14, xauPrice: 2900.5, ... }] }
     const item = data.items?.[0];
-    if (!item || typeof item.xagPrice !== 'number') {
+    const priceField = config.spotPriceField;
+    if (!item || typeof item[priceField] !== 'number') {
       return { success: false, price: 0, error: 'Invalid API response' };
     }
 
-    // xagPrice is silver price per oz in USD
-    return { success: true, price: item.xagPrice };
+    return { success: true, price: item[priceField] };
   } catch (error) {
     return {
       success: false,
@@ -101,55 +107,44 @@ async function fetchSpotPrice(): Promise<{ success: boolean; price: number; erro
   }
 }
 
-/** Get Yahoo Finance symbol for front-month silver futures */
-function getYahooFuturesSymbol(): { symbol: string; contract: string } {
-  const now = new Date();
-  const month = now.getMonth(); // 0-11
-  const year = now.getFullYear();
+/** Month codes for futures contracts */
+const MONTH_CODES: Record<number, { code: string; name: string }> = {
+  0: { code: 'F', name: 'JAN' },
+  1: { code: 'G', name: 'FEB' },
+  2: { code: 'H', name: 'MAR' },
+  3: { code: 'J', name: 'APR' },
+  4: { code: 'K', name: 'MAY' },
+  5: { code: 'M', name: 'JUN' },
+  6: { code: 'N', name: 'JUL' },
+  7: { code: 'Q', name: 'AUG' },
+  8: { code: 'U', name: 'SEP' },
+  9: { code: 'V', name: 'OCT' },
+  10: { code: 'X', name: 'NOV' },
+  11: { code: 'Z', name: 'DEC' },
+};
 
-  // Silver delivery months: Mar(H), May(K), Jul(N), Sep(U), Dec(Z)
-  // Month codes: H=March, K=May, N=July, U=September, Z=December
-  const deliveryMonths = [
-    { monthNum: 2, code: 'H', name: 'MAR' },  // March
-    { monthNum: 4, code: 'K', name: 'MAY' },  // May
-    { monthNum: 6, code: 'N', name: 'JUL' },  // July
-    { monthNum: 8, code: 'U', name: 'SEP' },  // September
-    { monthNum: 11, code: 'Z', name: 'DEC' }, // December
-  ];
+/** Get Yahoo Finance symbol for front-month futures for a metal */
+function getYahooFuturesSymbol(config: MetalConfig): { symbol: string; contract: string } {
+  const delivery = getNextDeliveryMonth(config);
+  const monthInfo = MONTH_CODES[delivery.month];
+  const yearCode = String(delivery.year).slice(-2);
 
-  // Find next delivery month
-  let targetYear = year;
-  let targetMonth = deliveryMonths[0];
-
-  for (const dm of deliveryMonths) {
-    // If we're before this delivery month (with some buffer for FND)
-    if (month < dm.monthNum || (month === dm.monthNum && now.getDate() < 20)) {
-      targetMonth = dm;
-      break;
-    }
-  }
-
-  // If we're past all delivery months this year, use next year's March
-  if (month >= 11 || (month === 11 && now.getDate() >= 20)) {
-    targetYear = year + 1;
-    targetMonth = deliveryMonths[0]; // March
-  }
-
-  const yearCode = String(targetYear).slice(-2);
-  const symbol = `SI${targetMonth.code}${yearCode}.CMX`;
-  const contract = `${targetMonth.name} ${yearCode}`;
+  // Silver = SI, Gold = GC
+  const symbolPrefix = config.id === 'silver' ? 'SI' : 'GC';
+  const symbol = `${symbolPrefix}${monthInfo.code}${yearCode}.CMX`;
+  const contract = `${monthInfo.name} ${yearCode}`;
 
   return { symbol, contract };
 }
 
 /** Fetch front-month futures price from Yahoo Finance */
-async function fetchFuturesPrice(): Promise<{
+async function fetchFuturesPrice(config: MetalConfig): Promise<{
   success: boolean;
   price: number;
   contract: string;
   sourceUrl: string;
 }> {
-  const { symbol, contract } = getYahooFuturesSymbol();
+  const { symbol, contract } = getYahooFuturesSymbol(config);
   const url = `${YAHOO_FINANCE_BASE}/${symbol}?interval=1d&range=1d`;
 
   try {
@@ -183,48 +178,30 @@ async function fetchFuturesPrice(): Promise<{
   }
 }
 
-/** Get current front-month contract string */
-function getFrontMonthContract(): string {
-  const now = new Date();
-  const month = now.getMonth();
-  const year = now.getFullYear() % 100;
-
-  const monthMap: Record<number, string> = {
-    0: 'MAR', 1: 'MAR', 2: 'MAR',
-    3: 'MAY', 4: 'MAY',
-    5: 'JUL', 6: 'JUL',
-    7: 'SEP', 8: 'SEP',
-    9: 'DEC', 10: 'DEC', 11: 'DEC',
-  };
-
-  return `${monthMap[month]} ${year}`;
+/** Get current front-month contract string for a metal */
+function getFrontMonthContract(config: MetalConfig): string {
+  const delivery = getNextDeliveryMonth(config);
+  const yearCode = delivery.year % 100;
+  return `${delivery.monthName} ${yearCode}`;
 }
 
-/** Get days until front-month expiry */
-function getDaysToExpiry(): number {
+/** Get days until front-month expiry for a metal */
+function getDaysToExpiry(config: MetalConfig): number {
   const now = new Date();
-  const month = now.getMonth();
-  const year = now.getFullYear();
+  const delivery = getNextDeliveryMonth(config);
 
-  // Approximate FND dates (last business day before delivery month)
-  const fndDates: Record<number, Date> = {
-    2: new Date(year, 1, 28), // Mar FND ~Feb 28
-    4: new Date(year, 3, 30), // May FND ~Apr 30
-    6: new Date(year, 5, 30), // Jul FND ~Jun 30
-    8: new Date(year, 7, 31), // Sep FND ~Aug 31
-    11: new Date(year, 10, 30), // Dec FND ~Nov 30
-  };
+  // Approximate FND is last business day of month before delivery month
+  // Delivery month is 1-indexed in the Date constructor
+  const fndMonth = delivery.month === 0 ? 11 : delivery.month - 1;
+  const fndYear = delivery.month === 0 ? delivery.year - 1 : delivery.year;
 
-  // Find next FND
-  const deliveryMonths = [2, 4, 6, 8, 11];
-  for (const dm of deliveryMonths) {
-    const fnd = fndDates[dm];
-    if (fnd && fnd > now) {
-      return Math.ceil((fnd.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-    }
-  }
+  // Get last day of the month before delivery
+  const fnd = new Date(fndYear, fndMonth + 1, 0); // Day 0 of next month = last day of this month
 
-  // If past all FNDs this year, return days to next year's March
-  const nextMarchFnd = new Date(year + 1, 1, 28);
-  return Math.ceil((nextMarchFnd.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
+  // Adjust for weekends
+  const day = fnd.getDay();
+  if (day === 0) fnd.setDate(fnd.getDate() - 2); // Sunday -> Friday
+  if (day === 6) fnd.setDate(fnd.getDate() - 1); // Saturday -> Friday
+
+  return Math.max(0, Math.ceil((fnd.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)));
 }

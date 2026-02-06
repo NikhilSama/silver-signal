@@ -1,23 +1,28 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 import { fetchShanghaiPremium, scoreShanghaiPremium } from '@/lib/api/shanghai';
 import { fetchSpotPrices } from '@/lib/api/spotprices';
 import { insertSnapshot, getLatestSnapshot } from '@/lib/db/queries';
 import { INDICATOR_IDS } from '@/types/indicator';
-import type { IndicatorSnapshotInsert } from '@/types/database';
+import { getMetalConfig, parseMetal } from '@/lib/constants/metals';
+import type { IndicatorSnapshotInsert, Metal } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 30;
 
-export async function GET(): Promise<NextResponse> {
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const metal = parseMetal(searchParams.get('metal'));
+  const config = getMetalConfig(metal);
+
   const indicatorId = INDICATOR_IDS.SHANGHAI_PREMIUM;
 
   try {
     // First get COMEX spot price (needed for premium calculation)
-    let comexSpot = 30; // Default fallback
+    let comexSpot = metal === 'silver' ? 30 : 2900; // Default fallback
 
     // Try to get from latest backwardation snapshot
-    const spotSnapshot = await getLatestSnapshot(INDICATOR_IDS.BACKWARDATION);
+    const spotSnapshot = await getLatestSnapshot(INDICATOR_IDS.BACKWARDATION, metal);
     if (spotSnapshot?.raw_value) {
       const spotData = spotSnapshot.raw_value as { spotPrice?: number };
       if (spotData.spotPrice && spotData.spotPrice > 0) {
@@ -26,19 +31,20 @@ export async function GET(): Promise<NextResponse> {
     }
 
     // If no snapshot, fetch fresh
-    if (comexSpot === 30) {
-      const spotResult = await fetchSpotPrices();
+    if ((metal === 'silver' && comexSpot === 30) || (metal === 'gold' && comexSpot === 2900)) {
+      const spotResult = await fetchSpotPrices(config);
       if (spotResult.success && spotResult.data) {
         comexSpot = spotResult.data.spotPrice;
       }
     }
 
-    const result = await fetchShanghaiPremium(comexSpot);
+    const result = await fetchShanghaiPremium(comexSpot, config);
 
     if (!result.success || !result.data) {
-      await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl);
+      await insertErrorSnapshot(indicatorId, result.error ?? 'Fetch failed', result.sourceUrl, metal);
       return NextResponse.json({
         success: false,
+        metal: config.displayName,
         indicatorId,
         error: result.error,
       });
@@ -48,6 +54,7 @@ export async function GET(): Promise<NextResponse> {
 
     const snapshot: IndicatorSnapshotInsert = {
       indicator_id: indicatorId,
+      metal,
       fetched_at: new Date(),
       data_date: result.data.reportDate,
       raw_value: { ...result.data },
@@ -63,6 +70,7 @@ export async function GET(): Promise<NextResponse> {
 
     return NextResponse.json({
       success: true,
+      metal: config.displayName,
       indicatorId,
       signal: score.signal,
       premiumPercent: result.data.premiumPercent,
@@ -72,10 +80,11 @@ export async function GET(): Promise<NextResponse> {
     });
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : 'Unknown error';
-    await insertErrorSnapshot(indicatorId, errorMsg, 'en.sge.com.cn');
+    await insertErrorSnapshot(indicatorId, errorMsg, 'goldprice.org', metal);
 
     return NextResponse.json({
       success: false,
+      metal: config.displayName,
       indicatorId,
       error: errorMsg,
     });
@@ -85,10 +94,12 @@ export async function GET(): Promise<NextResponse> {
 async function insertErrorSnapshot(
   indicatorId: number,
   error: string,
-  sourceUrl: string
+  sourceUrl: string,
+  metal: Metal
 ): Promise<void> {
   const snapshot: IndicatorSnapshotInsert = {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: new Date(),
     raw_value: { error },

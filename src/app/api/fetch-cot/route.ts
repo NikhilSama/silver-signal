@@ -1,9 +1,10 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 
 import { fetchLatestCOT, scoreSpeculatorNet, scoreCommercialShort } from '@/lib/api/cftc';
 import { insertSnapshot, getSnapshotHistory, snapshotExists } from '@/lib/db/queries';
 import { INDICATOR_IDS } from '@/types/indicator';
-import type { IndicatorSnapshotInsert } from '@/types/database';
+import { getMetalConfig, parseMetal } from '@/lib/constants/metals';
+import type { IndicatorSnapshotInsert, Metal } from '@/types/database';
 
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
@@ -12,10 +13,12 @@ export const maxDuration = 60;
 function createErrorSnapshot(
   indicatorId: number,
   error: string,
-  sourceUrl: string
+  sourceUrl: string,
+  metal: Metal
 ): IndicatorSnapshotInsert {
   return {
     indicator_id: indicatorId,
+    metal,
     fetched_at: new Date(),
     data_date: new Date(),
     raw_value: { error },
@@ -28,8 +31,12 @@ function createErrorSnapshot(
   };
 }
 
-export async function GET(): Promise<NextResponse> {
-  const result = await fetchLatestCOT();
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  const { searchParams } = new URL(request.url);
+  const metal = parseMetal(searchParams.get('metal'));
+  const config = getMetalConfig(metal);
+
+  const result = await fetchLatestCOT(config);
 
   // Handle fetch failure
   if (!result.success || !result.data || result.data.length === 0) {
@@ -37,13 +44,17 @@ export async function GET(): Promise<NextResponse> {
 
     // Store error snapshots for both indicators
     await insertSnapshot(
-      createErrorSnapshot(INDICATOR_IDS.COT_SPECULATOR, errorMsg, result.sourceUrl)
+      createErrorSnapshot(INDICATOR_IDS.COT_SPECULATOR, errorMsg, result.sourceUrl, metal)
     );
     await insertSnapshot(
-      createErrorSnapshot(INDICATOR_IDS.COT_COMMERCIAL, errorMsg, result.sourceUrl)
+      createErrorSnapshot(INDICATOR_IDS.COT_COMMERCIAL, errorMsg, result.sourceUrl, metal)
     );
 
-    return NextResponse.json({ success: false, error: errorMsg }, { status: 500 });
+    return NextResponse.json({
+      success: false,
+      error: errorMsg,
+      metal: config.displayName,
+    }, { status: 500 });
   }
 
   const latest = result.data[0];
@@ -51,7 +62,8 @@ export async function GET(): Promise<NextResponse> {
   // Check for duplicate (same data_date already exists)
   const speculatorExists = await snapshotExists(
     INDICATOR_IDS.COT_SPECULATOR,
-    latest.reportDate
+    latest.reportDate,
+    metal
   );
 
   if (speculatorExists) {
@@ -59,12 +71,13 @@ export async function GET(): Promise<NextResponse> {
       success: true,
       message: 'Data for this report date already exists, skipping',
       reportDate: latest.reportDate.toISOString(),
+      metal: config.displayName,
     });
   }
 
   // Get historical data for percentile calculations
-  const speculatorHistory = await getSnapshotHistory(INDICATOR_IDS.COT_SPECULATOR, 1095);
-  const commercialHistory = await getSnapshotHistory(INDICATOR_IDS.COT_COMMERCIAL, 1095);
+  const speculatorHistory = await getSnapshotHistory(INDICATOR_IDS.COT_SPECULATOR, 1095, metal);
+  const commercialHistory = await getSnapshotHistory(INDICATOR_IDS.COT_COMMERCIAL, 1095, metal);
 
   // Find prior week's data for WoW comparison
   const priorWeekDate = new Date(latest.reportDate);
@@ -103,6 +116,7 @@ export async function GET(): Promise<NextResponse> {
   // Insert snapshots
   const speculatorSnapshot: IndicatorSnapshotInsert = {
     indicator_id: INDICATOR_IDS.COT_SPECULATOR,
+    metal,
     fetched_at: new Date(),
     data_date: latest.reportDate,
     raw_value: { ...latest },
@@ -116,6 +130,7 @@ export async function GET(): Promise<NextResponse> {
 
   const commercialSnapshot: IndicatorSnapshotInsert = {
     indicator_id: INDICATOR_IDS.COT_COMMERCIAL,
+    metal,
     fetched_at: new Date(),
     data_date: latest.reportDate,
     raw_value: { ...latest },
@@ -132,6 +147,7 @@ export async function GET(): Promise<NextResponse> {
 
   return NextResponse.json({
     success: true,
+    metal: config.displayName,
     reportDate: latest.reportDate.toISOString(),
     speculator: { net: latest.speculatorNet, signal: speculatorScore.signal },
     commercial: { netShort: latest.commercialNetShort, signal: commercialScore.signal },
