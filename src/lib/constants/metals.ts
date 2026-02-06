@@ -57,7 +57,7 @@ const GOLD_CONFIG: MetalConfig = {
   contractSize: 100,
   cftcCode: '088691',
   cftcName: 'GOLD - COMMODITY EXCHANGE INC.',
-  vaultStocksFile: 'Gold_stocks.xls',
+  vaultStocksFile: 'Gold_Stocks.xls',
   futuresSymbol: 'GC=F',
   // Gold: Feb(1), Apr(3), Jun(5), Aug(7), Oct(9), Dec(11)
   deliveryMonths: [1, 3, 5, 7, 9, 11],
