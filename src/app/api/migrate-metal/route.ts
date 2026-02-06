@@ -40,11 +40,18 @@ export async function GET(): Promise<NextResponse> {
       ALTER TABLE indicator_metadata
       ADD COLUMN IF NOT EXISTS metal TEXT DEFAULT 'silver'
     `;
-    // Update primary key to composite (metal, indicator_id)
-    // Note: This is complex in Postgres, so we create a unique index instead
+    // Drop old primary key and create new composite one
+    try {
+      await sql`
+        ALTER TABLE indicator_metadata
+        DROP CONSTRAINT IF EXISTS indicator_metadata_pkey
+      `;
+    } catch {
+      // Constraint may not exist
+    }
     await sql`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_metadata_metal_indicator
-      ON indicator_metadata(metal, indicator_id)
+      ALTER TABLE indicator_metadata
+      ADD CONSTRAINT indicator_metadata_pkey PRIMARY KEY (metal, indicator_id)
     `;
     migrations.push({ table: 'indicator_metadata', success: true });
   } catch (error) {
