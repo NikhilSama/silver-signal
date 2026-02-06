@@ -61,10 +61,15 @@ export async function GET(): Promise<NextResponse> {
       ALTER TABLE daily_briefings
       ADD COLUMN IF NOT EXISTS metal TEXT DEFAULT 'silver'
     `;
-    // Drop old unique constraint and create new one with metal
-    await sql`
-      DROP INDEX IF EXISTS daily_briefings_briefing_date_key
-    `;
+    // Drop old unique constraint (it's a constraint, not just an index)
+    try {
+      await sql`
+        ALTER TABLE daily_briefings
+        DROP CONSTRAINT IF EXISTS daily_briefings_briefing_date_key
+      `;
+    } catch {
+      // Constraint may not exist, that's okay
+    }
     await sql`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_briefings_metal_date
       ON daily_briefings(metal, briefing_date)
